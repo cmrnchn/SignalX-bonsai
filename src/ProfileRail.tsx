@@ -7,11 +7,13 @@ import {
   type Customer,
   type Order,
   type OutboxItem,
+  type PaymentHandles,
   type Product,
   type Message,
   type ThreadActionSuggestion,
 } from "./api";
 import { fileSrcForPath } from "./attachmentPreview";
+import { PAYMENT_RAILS, payWithLines, paymentRailLabel } from "./payments";
 
 function money(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
@@ -81,13 +83,87 @@ function fallbackActions(
       kind: "send_invoice",
       payload: latestInvoiceable.id,
     });
-    out.push({ label: "Mark latest paid", kind: "mark_paid", payload: latestInvoiceable.id });
   }
   out.push({ label: "Open orders", kind: "open_orders", payload: threadId });
   if (!hasCustomer && !isGroupThread(threadId)) {
     out.push({ label: "Link as customer", kind: "link_customer", payload: "" });
   }
   return out.slice(0, 5);
+}
+
+function OpenInvoice({
+  orders,
+  payment,
+  rail,
+  onRail,
+  onSendInvoice,
+  onSendQuote,
+  onLargerQuote,
+  onMarkPaid,
+}: {
+  orders: Order[];
+  payment: PaymentHandles;
+  rail: string;
+  onRail: (rail: string) => void;
+  onSendInvoice: (orderId: string) => void;
+  onSendQuote?: (orderId: string) => void;
+  onLargerQuote: (orderId: string) => void;
+  onMarkPaid: (orderId: string, rail: string) => void;
+}) {
+  const open =
+    orders.find((o) => o.status === "invoiced") ??
+    orders.find((o) => o.status === "confirmed") ??
+    orders.find((o) => o.status === "draft");
+  if (!open) return null;
+  const lines = payWithLines(payment);
+  const canInvoice = open.status === "confirmed" || open.status === "invoiced";
+  const canPay = open.status !== "draft";
+  return (
+    <div className="profile-section profile-open-invoice">
+      <div className="profile-section-title">Open invoice</div>
+      <div className="thread-row-top">
+        <span className="thread-name">{open.id.slice(0, 8)}</span>
+        <span className={`status-pill status-${orderStatusTone(open.status)}`}>{open.status}</span>
+      </div>
+      <div className="profile-invoice-amount">{money(open.total_cents)}</div>
+      <div className="profile-section-title">How they pay</div>
+      {lines.length > 0 ? (
+        <pre className="profile-pay-with">{lines.join("\n")}</pre>
+      ) : (
+        <p className="hint tight">Add Cash App, Venmo, cash, or Monero in Settings. The invoice fills these in.</p>
+      )}
+      <div className="profile-invoice-actions">
+        {canInvoice ? (
+          <button type="button" className="action-btn primary" onClick={() => onSendInvoice(open.id)}>
+            Send invoice
+          </button>
+        ) : (
+          onSendQuote && (
+            <button type="button" className="action-btn primary" onClick={() => onSendQuote(open.id)}>
+              Send quote
+            </button>
+          )
+        )}
+        <button type="button" className="ghost-btn" onClick={() => onLargerQuote(open.id)}>
+          Larger quote
+        </button>
+        {canPay && (
+          <>
+            <select aria-label="Payment rail" value={rail} onChange={(e) => onRail(e.target.value)}>
+              {PAYMENT_RAILS.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.label}
+                </option>
+              ))}
+            </select>
+            <button type="button" className="ghost-btn" onClick={() => onMarkPaid(open.id, rail)}>
+              Mark paid
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
 }
 
 type Props = {
@@ -107,9 +183,12 @@ type Props = {
   onSummarize: () => Promise<string | null>;
   onLinkCustomer: () => void;
   onOpenOrders: () => void;
+  onOpenPerson: () => void;
   onSendInvoice: (orderId: string) => void;
   onSendQuote?: (orderId: string) => void;
-  onMarkPaid: (orderId: string) => void;
+  onLargerQuote: (orderId: string) => void;
+  onMarkPaid: (orderId: string, rail: string) => void;
+  payment: PaymentHandles;
   onToggleFavorite: (next: boolean) => void;
   onToggleMute: (next: boolean) => void;
   onSaveNotes: (notes: string) => void;
@@ -134,9 +213,12 @@ export function ProfileRail(props: Props) {
     onSummarize,
     onLinkCustomer,
     onOpenOrders,
+    onOpenPerson,
     onSendInvoice,
     onSendQuote,
+    onLargerQuote,
     onMarkPaid,
+    payment,
     onToggleFavorite,
     onToggleMute,
     onSaveNotes,
@@ -152,6 +234,7 @@ export function ProfileRail(props: Props) {
   const [productThumbs, setProductThumbs] = useState<{ id: string; name: string; src: string }[]>(
     [],
   );
+  const [rail, setRail] = useState("cash");
 
   const threadOrders = useMemo(
     () => orders.filter((o) => o.thread_id === threadId).sort((a, b) => b.created_at - a.created_at),
@@ -270,7 +353,7 @@ export function ProfileRail(props: Props) {
       case "mark_paid": {
         const id = resolveOrderId();
         if (!id) onStatus("No order to mark paid");
-        else onMarkPaid(id);
+        else onMarkPaid(id, rail);
         break;
       }
       case "open_orders":
@@ -309,10 +392,23 @@ export function ProfileRail(props: Props) {
           {initials}
         </span>
         <div className="profile-rail-title">
-          <strong>{title}</strong>
+          <button type="button" className="profile-open-person" onClick={onOpenPerson}>
+            {title}
+          </button>
           <div className="convo-sub">{group ? "Group" : formatPhone(threadId)}</div>
         </div>
       </header>
+
+      <OpenInvoice
+        orders={threadOrders}
+        payment={payment}
+        rail={rail}
+        onRail={setRail}
+        onSendInvoice={onSendInvoice}
+        onSendQuote={onSendQuote}
+        onLargerQuote={onLargerQuote}
+        onMarkPaid={onMarkPaid}
+      />
 
       <div className="profile-section">
         <div className="profile-section-title">Standing</div>
@@ -437,10 +533,11 @@ export function ProfileRail(props: Props) {
               </div>
               <div className="convo-sub">
                 {money(o.total_cents)} · {fmtTime(o.created_at)}
+                {o.payment_rail ? ` · ${paymentRailLabel(o.payment_rail)}` : ""}
               </div>
               <div className="row-actions">
-                {o.status !== "cancelled" && o.status !== "paid" && (
-                  <button type="button" className="ghost-btn" onClick={() => onMarkPaid(o.id)}>
+                {o.status !== "cancelled" && o.status !== "paid" && o.status !== "draft" && (
+                  <button type="button" className="ghost-btn" onClick={() => onMarkPaid(o.id, rail)}>
                     Paid
                   </button>
                 )}

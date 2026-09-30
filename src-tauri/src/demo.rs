@@ -61,6 +61,7 @@ fn product(
     image_path: String::new(),
     sell_options: packs,
     low_stock_threshold_milli: low_milli,
+    lifecycle: "active".into(),
     updated_at: now_ms(),
   }
 }
@@ -402,6 +403,7 @@ fn seed_customers_orders(state: &AppState, account: &str, ids: &std::collections
       total_cents: 3200,
       created_at: ago(28),
       updated_at: ago(6),
+      payment_rail: "cash".into(),
     },
     Order {
       id: "ord-maya-open".into(),
@@ -421,6 +423,7 @@ fn seed_customers_orders(state: &AppState, account: &str, ids: &std::collections
       total_cents: 1400,
       created_at: ago(1),
       updated_at: ago(1),
+      payment_rail: String::new(),
     },
     Order {
       id: "ord-jordan-quote".into(),
@@ -440,6 +443,7 @@ fn seed_customers_orders(state: &AppState, account: &str, ids: &std::collections
       total_cents: 2997,
       created_at: ago(4),
       updated_at: ago(4),
+      payment_rail: String::new(),
     },
     Order {
       id: "ord-priya-brew".into(),
@@ -459,6 +463,7 @@ fn seed_customers_orders(state: &AppState, account: &str, ids: &std::collections
       total_cents: 3600,
       created_at: ago(11),
       updated_at: ago(8),
+      payment_rail: String::new(),
     },
     Order {
       id: "ord-maya-old".into(),
@@ -478,6 +483,7 @@ fn seed_customers_orders(state: &AppState, account: &str, ids: &std::collections
       total_cents: 2800,
       created_at: ago(40),
       updated_at: ago(38),
+      payment_rail: String::new(),
     },
   ];
   for o in orders {

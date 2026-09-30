@@ -41,22 +41,34 @@ inventory ops, and Sales console.
 - Messages: profile context rail (standing with 7-day At risk, notes, AI, ledger, Send quote).
 - Settings → Backup: export/import data bundle (zip); chat-only export unchanged.
 
-## Long-term backlog (not next)
+## Operator desk (north star)
+
+Locked product contract and phase sequence (from the desk canvas):
+
+- Contract: `docs/superpowers/specs/2026-09-26-operator-desk-foundation-design.md`
+- Phases A–F: `docs/superpowers/plans/2026-09-26-operator-desk-phases.md`
+
+Authority in one line: the thread holds the invoice and the buttons; a rule may
+send that invoice; only you mark paid; Monero starts as a buyer lesson, not a
+rail. Expand one phase into a task-level plan before coding it.
+
+## Long-term backlog (parallel / messenger)
 
 **Messenger completeness**
 - Inbound Signal attachments (persist + render; profile rail Media)
 - Multi-file outbound / voice notes
 - Contact photos + real Apple Contacts
-- Keyboard shortcuts
+- Keyboard shortcuts (retarget when Shop / Intelligence / Dashboard land)
 - Refresh `figma-handoff/` to 4-column + Outbox + Backup + Sales
 
 **Operator reliability**
-- Unified Audit panel (IVR + commerce + outbox + auto-reply)
+- Unified Audit panel → prefer Intelligence → Activity (desk Phase C);
+  see also `docs/CURSOR_TASKS.md` Task 3
 - Backup v2: encrypted zip, scheduled local backups, optional identity-pack
 - Packaging / signed macOS build / launcher polish
 
 **AI / automation**
-- Rule-based workflows (keyword / time → outbox template)
+- Rule-based workflows → desk Phase E (Next time → runnable rules)
 - Scheduled outbound messages
 - Richer guarded auto-reply policies
 
@@ -64,12 +76,14 @@ inventory ops, and Sales console.
 - TUI mode (`--tui`)
 - External inventory webhooks beyond CSV
 - Payment processor (only if explicitly reopened)
+- Monero as a settlement rail (only after explicit reopen; lesson-only until then)
 
 **Still rejected**
 - Concurrent sessions / two live receive loops
 - Shared catalog across numbers
 - Native Signal bot buttons as primary IVR
 - Auto-send from AI chips
+- Mark paid from any automation
 
 ## Live IVR order smoke (manual)
 

@@ -1,5 +1,5 @@
-import { useState } from "react";
-import type { AiStatus, DeviceLinkStatus, Diagnostics, SessionStatus } from "../../api";
+import { useEffect, useState } from "react";
+import type { AiStatus, DeviceLinkStatus, Diagnostics, PaymentHandles, SessionStatus } from "../../api";
 import { DeviceLinkQr } from "../../DeviceLinkQr";
 import { canInvoke } from "../../runtime";
 
@@ -27,6 +27,8 @@ type Props = {
   onAddPinChange: (value: string) => void;
   rosterBusy: boolean;
   onAddAccount: () => void;
+  payment: PaymentHandles;
+  onSavePayment: (handles: PaymentHandles) => void;
 };
 
 function statusTone(setupNeeded: boolean, diagnostics: Diagnostics | null): string {
@@ -78,7 +80,13 @@ export function AccountSettings({
   onAddPinChange,
   rosterBusy,
   onAddAccount,
+  payment,
+  onSavePayment,
 }: Props) {
+  const [pay, setPay] = useState(payment);
+  useEffect(() => {
+    setPay(payment);
+  }, [payment]);
   const [pinCurrent, setPinCurrent] = useState("");
   const [pinNew, setPinNew] = useState("");
 
@@ -277,6 +285,59 @@ export function AccountSettings({
           />
           <button type="submit" className="action-btn primary" disabled={rosterBusy}>
             Add to roster
+          </button>
+        </form>
+      </div>
+
+      <div className="settings-card">
+        <div className="settings-card-head">
+          <h3>How customers pay</h3>
+        </div>
+        <p className="hint tight">
+          Invoice text fills these in. SignalX does not take the money or read Cash App, Venmo, or a
+          wallet. Mark paid only after you see the payment.
+        </p>
+        <form
+          className="pay-handles"
+          onSubmit={(e) => {
+            e.preventDefault();
+            onSavePayment(pay);
+          }}
+        >
+          <label className="field-stack">
+            <span className="field-label">Cash App</span>
+            <input
+              value={pay.cash_app}
+              placeholder="$cashtag"
+              onChange={(e) => setPay({ ...pay, cash_app: e.target.value })}
+            />
+          </label>
+          <label className="field-stack">
+            <span className="field-label">Venmo</span>
+            <input
+              value={pay.venmo}
+              placeholder="@handle"
+              onChange={(e) => setPay({ ...pay, venmo: e.target.value })}
+            />
+          </label>
+          <label className="field-stack">
+            <span className="field-label">Cash</span>
+            <input
+              value={pay.cash_note}
+              placeholder="In person, or where to leave it"
+              onChange={(e) => setPay({ ...pay, cash_note: e.target.value })}
+            />
+          </label>
+          <label className="field-stack">
+            <span className="field-label">Monero</span>
+            <input
+              value={pay.monero}
+              placeholder="Address"
+              onChange={(e) => setPay({ ...pay, monero: e.target.value })}
+            />
+          </label>
+          <button type="submit" className="action-btn primary">
+            Save payment handles
           </button>
         </form>
       </div>

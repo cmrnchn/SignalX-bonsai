@@ -2162,7 +2162,8 @@ button.audit-thread.linkish:hover {
   min-width: 0;
 }
 
-.profile-rail-title strong {
+.profile-rail-title strong,
+.profile-open-person {
   display: block;
   font-size: 15px;
   font-weight: 600;
@@ -2170,6 +2171,49 @@ button.audit-thread.linkish:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.profile-open-person {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  max-width: 100%;
+}
+
+.profile-open-person:hover {
+  text-decoration: underline;
+}
+
+.profile-invoice-amount {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.profile-pay-with {
+  margin: 0;
+  font-family: inherit;
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+.profile-invoice-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.pay-handles {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
 }
 
 .profile-section {

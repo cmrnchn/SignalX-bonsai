@@ -1093,6 +1093,7 @@ mod tests {
       image_path: String::new(),
       sell_options: vec![],
       low_stock_threshold_milli: 0,
+      lifecycle: "active".into(),
       updated_at: 0,
     }
   }
@@ -1124,6 +1125,7 @@ mod tests {
         price_cents: None,
       }],
       low_stock_threshold_milli: 0,
+      lifecycle: "active".into(),
       updated_at: 0,
     }
   }
@@ -1194,6 +1196,7 @@ mod tests {
           image_path: String::new(),
           sell_options: vec![],
           low_stock_threshold_milli: 0,
+          lifecycle: "active".into(),
           updated_at: 0,
         },
         1,
@@ -1230,6 +1233,7 @@ mod tests {
           image_path: String::new(),
           sell_options: vec![],
           low_stock_threshold_milli: 0,
+          lifecycle: "active".into(),
           updated_at: 0,
         },
         1,
@@ -1279,6 +1283,7 @@ mod tests {
           image_path: String::new(),
           sell_options: vec![],
           low_stock_threshold_milli: 0,
+          lifecycle: "active".into(),
           updated_at: 0,
         },
         1,
@@ -1307,6 +1312,7 @@ mod tests {
           image_path: String::new(),
           sell_options: vec![],
           low_stock_threshold_milli: 0,
+          lifecycle: "active".into(),
           updated_at: 0,
         },
         1,

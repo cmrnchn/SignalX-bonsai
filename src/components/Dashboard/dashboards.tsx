@@ -1,4 +1,12 @@
-import type { ContactMeta, GroupMeta, Order, OutboxSummary, Product, ThreadSummary } from "../../api";
+import type {
+  CommerceAuditEvent,
+  ContactMeta,
+  GroupMeta,
+  Order,
+  OutboxSummary,
+  Product,
+  ThreadSummary,
+} from "../../api";
 import { countsTowardRevenue } from "../../format";
 import { isLowStock, isOutOfStock } from "../Catalog/catalog";
 import { actionsFor, type Person } from "../People/people";
@@ -31,6 +39,8 @@ export type DashboardData = {
   sectionLabel: string;
   stats: DashboardStat[];
   cards: DashboardCard[];
+  secondarySectionLabel?: string;
+  secondaryCards?: DashboardCard[];
   shortcuts: DashboardShortcut[];
 };
 
@@ -478,6 +488,125 @@ export function peopleDashboard(
 }
 
 /* -------------------------------------------------------------------- Home */
+
+const HANDLED_KINDS = new Set([
+  "invoice_sent",
+  "invoice.queued",
+  "quote_sent",
+  "order_paid",
+  "order.paid",
+]);
+
+/** Home is the handoff: what still needs a person, and what a send or a
+ *  payment confirmation already covered. Counts and shortcut jumps live on
+ *  the pages they belong to. */
+export function todayPlan(
+  orders: Order[],
+  audit: CommerceAuditEvent[],
+  titleFor: (threadId: string) => string,
+  actions: {
+    openThread: (threadId: string) => void;
+    sendInvoice: (orderId: string) => void;
+  },
+  alerts: DashboardCard[] = [],
+): DashboardData {
+  const waiting = orders
+    .filter((o) => o.status === "confirmed" || o.status === "invoiced")
+    .sort((a, b) => a.updated_at - b.updated_at);
+
+  const prepare: DashboardCard[] = waiting.slice(0, 8).map((o) => {
+    const who = titleFor(o.thread_id);
+    if (o.status === "confirmed") {
+      return {
+        key: `prep-${o.id}`,
+        icon: <IconPendingInvoice />,
+        kicker: "Needs a send",
+        title: `${who} · ${moneyish(o.total_cents)}`,
+        body: "Confirmed. Send the invoice — the pay-with lines are filled in.",
+        urgent: true,
+        primary: { label: "Send invoice", onClick: () => actions.sendInvoice(o.id) },
+        secondary: { label: "Open chat", onClick: () => actions.openThread(o.thread_id) },
+      };
+    }
+    return {
+      key: `prep-${o.id}`,
+      icon: <IconPendingInvoice />,
+      kicker: "Needs confirmation",
+      title: `${who} · ${moneyish(o.total_cents)}`,
+      body: "Invoice is out. Open the chat and mark paid once you see the payment.",
+      urgent: true,
+      primary: { label: "Open chat", onClick: () => actions.openThread(o.thread_id) },
+    };
+  });
+
+  const cards = [...alerts, ...prepare];
+  if (cards.length === 0) {
+    cards.push({
+      key: "prepare-clear",
+      icon: <IconFulfilled />,
+      kicker: "Prepare",
+      title: "Clear",
+      body: "No invoice to send and no payment to confirm.",
+    });
+  }
+
+  const seen = new Set<string>();
+  const handled: DashboardCard[] = [];
+  for (const e of audit) {
+    if (!HANDLED_KINDS.has(e.kind) || handled.length >= 6) continue;
+    if (e.order_id) seen.add(e.order_id);
+    handled.push({
+      key: `done-${e.id}`,
+      icon: <IconFulfilled />,
+      kicker: e.kind.includes("paid") ? "You confirmed" : "Already sent",
+      title: e.summary,
+      body: e.kind.includes("paid")
+        ? "Payment was recorded by you, with the rail."
+        : "The desk already queued this.",
+      primary: e.thread_id
+        ? { label: "Open chat", onClick: () => actions.openThread(e.thread_id!) }
+        : undefined,
+    });
+  }
+  for (const o of orders) {
+    if (o.status !== "paid" || seen.has(o.id) || handled.length >= 6) continue;
+    handled.push({
+      key: `paid-${o.id}`,
+      icon: <IconFulfilled />,
+      kicker: "You confirmed",
+      title: `${titleFor(o.thread_id)} · ${moneyish(o.total_cents)}`,
+      body: "Marked paid.",
+      primary: { label: "Open chat", onClick: () => actions.openThread(o.thread_id) },
+    });
+  }
+  if (handled.length === 0) {
+    handled.push({
+      key: "handled-quiet",
+      icon: <IconFulfilled />,
+      kicker: "Already handled",
+      title: "Quiet",
+      body: "Nothing has been sent or marked paid yet.",
+    });
+  }
+
+  return {
+    title: "Today's plan",
+    subtitle:
+      prepare.length === 0
+        ? "Nothing is waiting on you."
+        : `${prepare.length} still need you`,
+    sectionLabel: "Prepare",
+    stats: [],
+    cards,
+    secondarySectionLabel: "Already handled",
+    secondaryCards: handled,
+    shortcuts: [],
+  };
+}
+
+function moneyish(cents: number): string {
+  return `$${(cents / 100).toFixed(2)}`;
+}
 
 /** Consolidates the four page dashboards into one landing view: the single
  *  most-telling stat from each page, plus each page's top card if it has

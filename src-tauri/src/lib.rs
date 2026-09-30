@@ -26,7 +26,10 @@ mod validation;
 use ivr::{thread_allowed, IvrMenus, IvrSettings, IvrStore};
 use commerce::{format_catalog_list, CommerceStore, Customer, Product};
 use commerce_audit::CommerceAuditStore;
-use orders::{format_invoice, format_order_status, format_quote, Order, OrderLineInput, OrderStore};
+use orders::{
+  append_pay_with, format_invoice, format_order_status, format_quote, Order, OrderLineInput,
+  OrderStore, PaymentHandles,
+};
 use link::{DeviceLinkManager, DeviceLinkStatus};
 use backup::{export_data_bundle, import_data_bundle, ImportMode};
 use session::SessionControl;
@@ -4076,13 +4079,13 @@ struct ThreadActionSuggestion {
 }
 
 fn thread_action_kind_allowed(kind: &str) -> bool {
+  // mark_paid is operator-only and records a rail. A suggestion or menu must not do it.
   matches!(
     kind,
     "draft"
       | "summarize"
       | "send_invoice"
       | "send_quote"
-      | "mark_paid"
       | "open_orders"
       | "link_customer"
       | "compose"
@@ -4119,11 +4122,6 @@ fn fallback_thread_actions(
     out.push(ThreadActionSuggestion {
       label: "Send latest invoice".into(),
       kind: "send_invoice".into(),
-      payload: o.id.clone(),
-    });
-    out.push(ThreadActionSuggestion {
-      label: "Mark latest paid".into(),
-      kind: "mark_paid".into(),
       payload: o.id.clone(),
     });
   }
@@ -4221,8 +4219,9 @@ fn suggest_thread_actions(state: &AppState, thread_id: String, last_n: Option<u3
 
   let system = "You suggest operator quick actions for a Signal shop desk. \
 Return ONLY a JSON array of 3 to 5 objects: {\"label\",\"kind\",\"payload\"}. \
-kind must be one of: draft, summarize, send_invoice, send_quote, mark_paid, open_orders, link_customer, compose. \
-For send_invoice/send_quote/mark_paid use payload=order id or \"latest\". Never invent order ids. No markdown.";
+kind must be one of: draft, summarize, send_invoice, send_quote, open_orders, link_customer, compose. \
+Do not suggest mark_paid, price changes, or arming a person. \
+For send_invoice/send_quote use payload=order id or \"latest\". Never invent order ids. No markdown.";
 
   let user = format!(
     "COMMERCE:\n{commerce_snap}\n\nTHREAD:\n{ctx}\n\nSuggest actions for the operator."
@@ -5480,7 +5479,10 @@ fn ivr_place_order(state: &AppState, thread_id: &str, session: &ivr::IvrSession)
       );
       emit_event("commerce://orders", state.orders.list());
       emit_event("commerce://products", state.commerce.list_products());
-      let invoice = format_invoice(&order, "SignalX");
+      let invoice = append_pay_with(
+        &format_invoice(&order, "SignalX"),
+        &state.orders.load_payment_handles().pay_with_text(),
+      );
       let menus = state.ivr.menus();
       let main_prompt = menus
         .nodes
@@ -6159,9 +6161,57 @@ fn duplicate_order_as_draft(state: &AppState, id: String) -> Value {
   }
 }
 
+fn mark_order_paid(state: &AppState, id: String, rail: String) -> Value {
+  if let Some(v) = reject_if_import_locked(state) {
+    return v;
+  }
+  match state
+    .orders
+    .mark_paid(&state.commerce, id.trim(), rail.trim(), now_ms())
+  {
+    Ok(order) => {
+      state.commerce_audit.record(
+        "order_paid",
+        &format!(
+          "{} → paid · {}",
+          &order.id[..8.min(order.id.len())],
+          order.payment_rail
+        ),
+        Some(order.id.clone()),
+        None,
+        Some(order.thread_id.clone()),
+        now_ms(),
+      );
+      emit_event("commerce://orders", state.orders.list());
+      ok_t(order)
+    }
+    Err(e) => err(e),
+  }
+}
+
+fn get_payment_handles(state: &AppState) -> Value {
+  ok_t(state.orders.load_payment_handles())
+}
+
+fn set_payment_handles(state: &AppState, handles: PaymentHandles) -> Value {
+  if let Some(v) = reject_if_import_locked(state) {
+    return v;
+  }
+  match state.orders.save_payment_handles(&handles) {
+    Ok(()) => ok_t(handles),
+    Err(e) => err(e),
+  }
+}
+
 fn set_order_status(state: &AppState, id: String, status: String) -> Value {
   if let Some(v) = reject_if_import_locked(state) {
     return v;
+  }
+  if status.trim().eq_ignore_ascii_case("paid") {
+    return err(
+      "Mark paid from the desk and record how they paid (Cash App, Venmo, cash, or Monero)."
+        .to_string(),
+    );
   }
   match state
     .orders
@@ -6200,7 +6250,10 @@ fn send_order_invoice(state: &AppState, id: String) -> Value {
   if order.status == "draft" {
     return err("confirm the quote before sending an invoice (or use Send quote)".into());
   }
-  let body = format_invoice(&order, "SignalX");
+  let body = append_pay_with(
+    &format_invoice(&order, "SignalX"),
+    &state.orders.load_payment_handles().pay_with_text(),
+  );
   let (_k, recipient) = recipient_from_thread_id(&order.thread_id);
   match queue_outgoing_message(state, order.thread_id.clone(), recipient, body) {
     v if v.get("success").and_then(|x| x.as_bool()).unwrap_or(false) => {
@@ -6881,6 +6934,18 @@ fn cmd_set_order_status(state: State<'_, AppState>, id: String, status: String) 
   set_order_status(&state, id, status)
 }
 #[tauri::command]
+fn cmd_mark_order_paid(state: State<'_, AppState>, id: String, rail: String) -> Value {
+  mark_order_paid(&state, id, rail)
+}
+#[tauri::command]
+fn cmd_get_payment_handles(state: State<'_, AppState>) -> Value {
+  get_payment_handles(&state)
+}
+#[tauri::command]
+fn cmd_set_payment_handles(state: State<'_, AppState>, handles: PaymentHandles) -> Value {
+  set_payment_handles(&state, handles)
+}
+#[tauri::command]
 fn cmd_send_order_invoice(state: State<'_, AppState>, id: String) -> Value {
   send_order_invoice(&state, id)
 }
@@ -7323,6 +7388,9 @@ pub fn run() {
       cmd_confirm_order,
       cmd_duplicate_order_as_draft,
       cmd_set_order_status,
+      cmd_mark_order_paid,
+      cmd_get_payment_handles,
+      cmd_set_payment_handles,
       cmd_send_order_invoice,
       cmd_send_order_quote,
       cmd_list_commerce_audit,

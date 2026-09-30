@@ -10,10 +10,14 @@
   multiple numbers; switching stops receive/outbox for the previous identity.
   Commerce, IVR, and auto-reply are stored under `accounts/{id}/`.
 - **Send path:** all outbound messages go through the outbox.
-- **Next:** see long-term backlog in `docs/NEXT_STEPS.md` (inbound media,
-  unified Audit, keyboard shortcuts, backup v2, etc.). Commerce-depth phases
-  1–4 are shipped. `docs/CURSOR_TASKS.md` has four of these scoped into
-  ready-to-implement tasks with exact file/line citations.
+- **Next (product north star):** operator desk contract —
+  `docs/superpowers/specs/2026-09-26-operator-desk-foundation-design.md` —
+  and phased sequence —
+  `docs/superpowers/plans/2026-09-26-operator-desk-phases.md`
+  (Dashboard / Shop / Intelligence; rules may send; only you mark paid).
+- **Next (messenger backlog):** `docs/NEXT_STEPS.md` long-term items;
+  `docs/CURSOR_TASKS.md` has four scoped with file/line citations. Commerce-depth
+  phases 1–4 are shipped.
 
 ## Run it
 

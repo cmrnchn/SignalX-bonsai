@@ -39,8 +39,55 @@ export type PageDashboardProps = {
   stats: DashboardStat[];
   sectionLabel: string;
   cards: DashboardCard[];
+  secondarySectionLabel?: string;
+  secondaryCards?: DashboardCard[];
   shortcuts: DashboardShortcut[];
 };
+
+function DashboardCardList({ label, cards }: { label: string; cards: DashboardCard[] }) {
+  if (cards.length === 0) return null;
+  return (
+    <>
+      <p className="dash-section-label">
+        <span className="dash-dot" aria-hidden />
+        {label}
+      </p>
+      {cards.map((c) => (
+        <div key={c.key} className={c.urgent ? "dash-card urgent" : "dash-card"}>
+          <div className={c.icon ? "dash-card-av icon" : "dash-card-av"}>
+            {c.icon ?? c.avatarLabel ?? ""}
+          </div>
+          <div className="dash-card-body">
+            <div className="dash-card-kicker">{c.kicker}</div>
+            <div className="dash-card-title">{c.title}</div>
+            <div className="dash-card-text">
+              {c.body}
+              {c.why && <WhyTip why={c.why} />}
+            </div>
+            {(c.primary || c.secondary) && (
+              <div className="dash-card-ask">
+                {c.primary && (
+                  <button
+                    type="button"
+                    className={c.urgent ? "dash-btn urgent" : "dash-btn primary"}
+                    onClick={c.primary.onClick}
+                  >
+                    {c.primary.label}
+                  </button>
+                )}
+                {c.secondary && (
+                  <button type="button" className="dash-btn ghost" onClick={c.secondary.onClick}>
+                    {c.secondary.label}
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      ))}
+    </>
+  );
+}
 
 /** The page-specific landing screen shown before drilling into a list —
  *  same shell for Messages, Catalog, Orders and People, driven entirely by
@@ -51,6 +98,8 @@ export function PageDashboard({
   stats,
   sectionLabel,
   cards,
+  secondarySectionLabel,
+  secondaryCards = [],
   shortcuts,
 }: PageDashboardProps) {
   return (
@@ -85,46 +134,9 @@ export function PageDashboard({
         </div>
       )}
 
-      {cards.length > 0 && (
-        <>
-          <p className="dash-section-label">
-            <span className="dash-dot" aria-hidden />
-            {sectionLabel}
-          </p>
-          {cards.map((c) => (
-            <div key={c.key} className={c.urgent ? "dash-card urgent" : "dash-card"}>
-              <div className={c.icon ? "dash-card-av icon" : "dash-card-av"}>
-                {c.icon ?? c.avatarLabel ?? ""}
-              </div>
-              <div className="dash-card-body">
-                <div className="dash-card-kicker">{c.kicker}</div>
-                <div className="dash-card-title">{c.title}</div>
-                <div className="dash-card-text">
-                  {c.body}
-                  {c.why && <WhyTip why={c.why} />}
-                </div>
-                {(c.primary || c.secondary) && (
-                  <div className="dash-card-ask">
-                    {c.primary && (
-                      <button
-                        type="button"
-                        className={c.urgent ? "dash-btn urgent" : "dash-btn primary"}
-                        onClick={c.primary.onClick}
-                      >
-                        {c.primary.label}
-                      </button>
-                    )}
-                    {c.secondary && (
-                      <button type="button" className="dash-btn ghost" onClick={c.secondary.onClick}>
-                        {c.secondary.label}
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
-            </div>
-          ))}
-        </>
+      <DashboardCardList label={sectionLabel} cards={cards} />
+      {secondarySectionLabel && (
+        <DashboardCardList label={secondarySectionLabel} cards={secondaryCards} />
       )}
 
       {shortcuts.length > 0 && (

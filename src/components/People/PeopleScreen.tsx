@@ -29,6 +29,7 @@ import {
   IconX,
 } from "../../navIcons";
 import { USE_FIXTURES, fxMessages } from "../../devFixtures";
+import { paymentRailLabel } from "../../payments";
 import { WhyTip } from "../WhyTip";
 import { useEscapeLayer } from "../../overlayEscape";
 import { useContextMenu, ContextMenu, MenuEditor, getMenuByObjectType, updateMenu } from "../ContextMenu";
@@ -974,7 +975,8 @@ export function PeopleScreen({
                         </span>
                       </div>
                       <div className="convo-sub">
-                        {money(o.total_cents)} · {fmtTime(o.created_at)} ·{" "}
+                        {money(o.total_cents)} · {fmtTime(o.created_at)}
+                        {o.payment_rail ? ` · ${paymentRailLabel(o.payment_rail)}` : ""} ·{" "}
                         {o.lines.map((l) => `${l.name}×${l.quantity}`).join(", ")}
                       </div>
                     </li>

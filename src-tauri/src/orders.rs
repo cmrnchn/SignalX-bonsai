@@ -53,6 +53,9 @@ pub struct Order {
   pub total_cents: i64,
   pub created_at: i64,
   pub updated_at: i64,
+  /// How a paid order was settled: cash_app, venmo, cash, or monero. Empty until marked paid.
+  #[serde(default)]
+  pub payment_rail: String,
 }
 
 /// Allowed order statuses and transitions for `OrderStore::set_status`.
@@ -210,6 +213,7 @@ impl OrderStore {
       total_cents: total,
       created_at: now,
       updated_at: now,
+      payment_rail: String::new(),
     };
     self.orders.lock().unwrap().push(order.clone());
     self.persist()?;
@@ -434,6 +438,110 @@ impl OrderStore {
     self.persist()?;
     out.ok_or_else(|| "order not found".to_string())
   }
+
+  /// Operator-only. A menu step or a rule must not call this.
+  pub fn mark_paid(
+    &self,
+    commerce: &CommerceStore,
+    id: &str,
+    rail: &str,
+    now: i64,
+  ) -> Result<Order, String> {
+    let rail = normalize_payment_rail(rail)?;
+    self.set_status(commerce, id, "paid", now)?;
+    let mut out = None;
+    {
+      let mut list = self.orders.lock().unwrap();
+      let o = list
+        .iter_mut()
+        .find(|x| x.id == id)
+        .ok_or_else(|| "order not found".to_string())?;
+      o.payment_rail = rail;
+      o.updated_at = now;
+      out = Some(o.clone());
+    }
+    self.persist()?;
+    out.ok_or_else(|| "order not found".to_string())
+  }
+
+  pub fn payment_handles_path(&self) -> PathBuf {
+    let orders_path = self.path.lock().unwrap().clone();
+    orders_path
+      .parent()
+      .map(|p| p.join("payment.json"))
+      .unwrap_or_else(|| PathBuf::from("payment.json"))
+  }
+
+  pub fn load_payment_handles(&self) -> PaymentHandles {
+    let path = self.payment_handles_path();
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+      return PaymentHandles::default();
+    };
+    serde_json::from_str(&raw).unwrap_or_default()
+  }
+
+  pub fn save_payment_handles(&self, handles: &PaymentHandles) -> Result<(), String> {
+    let path = self.payment_handles_path();
+    if let Some(dir) = path.parent() {
+      std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let raw = serde_json::to_string_pretty(handles).map_err(|e| e.to_string())?;
+    std::fs::write(&path, raw).map_err(|e| e.to_string())
+  }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct PaymentHandles {
+  #[serde(default)]
+  pub cash_app: String,
+  #[serde(default)]
+  pub venmo: String,
+  #[serde(default)]
+  pub cash_note: String,
+  #[serde(default)]
+  pub monero: String,
+}
+
+impl PaymentHandles {
+  pub fn pay_with_text(&self) -> String {
+    let mut lines = Vec::new();
+    let cash_app = self.cash_app.trim();
+    let venmo = self.venmo.trim();
+    let cash_note = self.cash_note.trim();
+    let monero = self.monero.trim();
+    if !cash_app.is_empty() {
+      lines.push(format!("Cash App: {cash_app}"));
+    }
+    if !venmo.is_empty() {
+      lines.push(format!("Venmo: {venmo}"));
+    }
+    if !cash_note.is_empty() {
+      lines.push(format!("Cash: {cash_note}"));
+    }
+    if !monero.is_empty() {
+      lines.push(format!("Monero: {monero}"));
+    }
+    lines.join("\n")
+  }
+}
+
+pub fn normalize_payment_rail(rail: &str) -> Result<String, String> {
+  let rail = rail.trim().to_ascii_lowercase().replace(' ', "_");
+  match rail.as_str() {
+    "cash_app" | "cashapp" => Ok("cash_app".into()),
+    "venmo" => Ok("venmo".into()),
+    "cash" => Ok("cash".into()),
+    "monero" | "xmr" => Ok("monero".into()),
+    _ => Err("payment must be cash_app, venmo, cash, or monero".into()),
+  }
+}
+
+pub fn append_pay_with(body: &str, pay_with: &str) -> String {
+  let pay = pay_with.trim();
+  if pay.is_empty() {
+    return body.to_string();
+  }
+  format!("{body}\n\nPay with:\n{pay}")
 }
 
 pub fn format_invoice(order: &Order, business_name: &str) -> String {
@@ -519,6 +627,7 @@ mod tests {
       total_cents: 1000,
       created_at: 0,
       updated_at: 0,
+      payment_rail: String::new(),
     };
     let s = format_invoice(&order, "Acme");
     assert!(s.contains("Acme"));
@@ -586,6 +695,7 @@ mod tests {
         total_cents: 100,
         created_at: 1,
         updated_at: 1,
+        payment_rail: String::new(),
       });
     }
 
@@ -593,9 +703,12 @@ mod tests {
     let invoiced = store.set_status(&commerce, "o1", "invoiced", 2).unwrap();
     assert_eq!(invoiced.status, "invoiced");
 
-    let paid = store.set_status(&commerce, "o1", "paid", 3).unwrap();
+    let paid = store.mark_paid(&commerce, "o1", "venmo", 3).unwrap();
     assert_eq!(paid.status, "paid");
+    assert_eq!(paid.payment_rail, "venmo");
     assert_eq!(paid.updated_at, 3);
+    let bad = store.mark_paid(&commerce, "o1", "card", 3).unwrap_err();
+    assert!(bad.contains("payment must be"), "{bad}");
 
     let fulfilled = store.set_status(&commerce, "o1", "fulfilled", 4).unwrap();
     assert_eq!(fulfilled.status, "fulfilled");
@@ -636,6 +749,7 @@ mod tests {
       image_path: String::new(),
       sell_options: vec![],
       low_stock_threshold_milli: 0,
+      lifecycle: "active".into(),
       updated_at: 0,
     };
     let commerce_a = CommerceStore::new(&dir_a);
@@ -692,6 +806,7 @@ mod tests {
           image_path: String::new(),
           sell_options: vec![],
           low_stock_threshold_milli: 0,
+          lifecycle: "active".into(),
           updated_at: 0,
         },
         1,
@@ -741,5 +856,15 @@ mod tests {
       .unwrap();
     assert_eq!(commerce.list_products()[0].quantity_base_milli, 5000);
     let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn payment_rail_and_pay_with_text() {
+    assert_eq!(normalize_payment_rail("Cash App").unwrap(), "cash_app");
+    assert_eq!(normalize_payment_rail("xmr").unwrap(), "monero");
+    assert!(normalize_payment_rail("card").is_err());
+    let body = append_pay_with("Invoice", "Cash App: $shop");
+    assert!(body.contains("Pay with:\nCash App: $shop"));
+    assert_eq!(append_pay_with("Invoice", "  "), "Invoice");
   }
 }

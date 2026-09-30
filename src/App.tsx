@@ -21,6 +21,7 @@ import {
   type IvrSettings,
   type Message,
   type Order,
+  type PaymentHandles,
   type OutboxItem,
   type OutboxSummary,
   type Product,
@@ -62,7 +63,8 @@ import { SearchOverlay } from "./components/SearchOverlay";
 import { PeopleScreen } from "./components/People/PeopleScreen";
 import { buildDirectory } from "./components/People/people";
 import { PageDashboard, PageNoticeBar } from "./components/Dashboard/PageDashboard";
-import { catalogDashboard, homeDashboard, messagesDashboard, ordersDashboard, peopleDashboard } from "./components/Dashboard/dashboards";
+import { catalogDashboard, ordersDashboard, peopleDashboard, todayPlan } from "./components/Dashboard/dashboards";
+import { EMPTY_PAYMENT_HANDLES, paymentRailLabel } from "./payments";
 import { matchingMessages, matchingOrders, matchingPeople, matchingProducts, type SearchScope } from "./globalSearch";
 import { OrdersScreen, EMPTY_ORDER_FILTER, type OrderFilterState } from "./components/Orders/OrdersScreen";
 import { SalesScreen } from "./components/Sales/SalesScreen";
@@ -388,6 +390,7 @@ export default function App() {
   const [auditReal, setAudit] = useState<AutoReplyAuditEntry[]>([]);
   const [salesSummaryReal, setSalesSummary] = useState<SalesSummary | null>(null);
   const [commerceAuditReal, setCommerceAudit] = useState<CommerceAuditEvent[]>([]);
+  const [paymentHandles, setPaymentHandles] = useState<PaymentHandles>(EMPTY_PAYMENT_HANDLES);
   const [ivrAuditReal, setIvrAudit] = useState<SimpleAuditEntry[]>([]);
   const [outboxAuditReal, setOutboxAudit] = useState<SimpleAuditEntry[]>([]);
   const [salesRange, setSalesRange] = useState<"7" | "30" | "all">("30");
@@ -499,7 +502,7 @@ export default function App() {
   };
 
   const refreshMeta = async () => {
-    const [c, g, ar, au, ivr, prods, custs, ords] = await Promise.all([
+    const [c, g, ar, au, ivr, prods, custs, ords, commerce, pay] = await Promise.all([
       api.listContactMeta(),
       api.listGroupMeta(),
       api.getAutoReplySettings(),
@@ -508,6 +511,8 @@ export default function App() {
       api.listProducts(),
       api.listCustomers(),
       api.listOrders(),
+      api.listCommerceAudit(40),
+      api.getPaymentHandles(),
     ]);
     if (c.success) setContacts(c.data);
     if (g.success) setGroups(g.data);
@@ -520,6 +525,12 @@ export default function App() {
     }
     if (custs.success) setCustomers(custs.data);
     if (ords.success) setOrders(ords.data);
+    if (commerce.success) setCommerceAudit(commerce.data);
+    if (pay.success) {
+      setPaymentHandles((prev) =>
+        JSON.stringify(prev) === JSON.stringify(pay.data) ? prev : pay.data,
+      );
+    }
   };
 
   const applySession = (s: SessionStatus) => {
@@ -1575,11 +1586,34 @@ export default function App() {
     if (sum.success) setOutboxSummary(sum.data);
   };
 
+  const markOrderPaid = async (id: string, rail: string) => {
+    const res = await api.markOrderPaid(id, rail);
+    if (!res.success) setStatus(res.error);
+    else setStatus(`Order → paid · ${paymentRailLabel(res.data.payment_rail || rail)}`);
+    await refreshMeta();
+  };
+
   const setOrderLifecycle = async (id: string, status: string) => {
+    if (status === "paid") {
+      const rail = window.prompt(
+        "How did they pay? Type cash_app, venmo, cash, or monero.",
+        "cash",
+      );
+      if (!rail?.trim()) return;
+      await markOrderPaid(id, rail.trim());
+      return;
+    }
     const res = await api.setOrderStatus(id, status);
     if (!res.success) setStatus(res.error);
     else setStatus(`Order → ${status}`);
     await refreshMeta();
+  };
+
+  const largerQuote = async (id: string) => {
+    const draft = await duplicateAsDraft(id);
+    if (draft) {
+      setStatus(`Draft ${draft.id.slice(0, 8)} — raise the amount, then send the quote`);
+    }
   };
 
   const sendInvoice = async (id: string) => {
@@ -2809,6 +2843,17 @@ export default function App() {
               onAddPinChange={setAddPin}
               rosterBusy={rosterBusy}
               onAddAccount={() => void onAddAccount(addNumber, addPin, addLabel)}
+              payment={paymentHandles}
+              onSavePayment={(handles) => {
+                void (async () => {
+                  const res = await api.setPaymentHandles(handles);
+                  if (!res.success) setStatus(res.error);
+                  else {
+                    setPaymentHandles(res.data);
+                    setStatus("Payment handles saved");
+                  }
+                })();
+              }}
             />
           )}
           {settingsTab === "backup" && (
@@ -2878,47 +2923,16 @@ export default function App() {
       <main className="convo">
         {!selectedId ? (
           <PageDashboard
-            {...homeDashboard(
+            {...todayPlan(
+              orders,
+              commerceAudit,
+              (id) => threadTitle(id, contacts, groups, customers),
               {
-                messages: messagesDashboard(threads, outboxSummary, contacts, groups, {
-                  openThread: (id) => setSelectedId(id),
-                  goOutbox: () => setPanel("outbox"),
-                  goNewMessage: () => setNewDmOpen(true),
-                }),
-                catalog: catalogDashboard(products, orders, {
-                  openProduct: (id) => {
-                    setPanel("catalog");
-                    setCatalogProductId(id);
-                  },
-                  goAddProduct: () => setPanel("catalog"),
-                  goLowStockList: () => setPanel("catalog"),
-                }),
-                orders: ordersDashboard(orders, money, {
-                  openOrder: (id) => {
-                    setPanel("orders");
-                    setFocusOrderId(id);
-                  },
-                  goNewOrder: () => setPanel("orders"),
-                  goUnpaidList: () => setPanel("orders"),
-                }),
-                people: peopleDashboard(directory, money, {
-                  openPerson: (key) => {
-                    setPanel("people");
-                    setPeopleKey(key);
-                  },
-                  openChat: (threadId) => {
-                    setSelectedId(threadId);
-                    setPanel("threads");
-                  },
-                  goAddPerson: () => setPanel("people"),
-                  goHaventHeardList: () => setPanel("people"),
-                }),
-              },
-              {
-                goMessages: () => setPanel("threads"),
-                goCatalog: () => setPanel("catalog"),
-                goOrders: () => setPanel("orders"),
-                goPeople: () => setPanel("people"),
+                openThread: (id) => {
+                  setSelectedId(id);
+                  setPanel("threads");
+                },
+                sendInvoice: (id) => void sendInvoice(id),
               },
               setupNeeded
                 ? [
@@ -3019,9 +3033,15 @@ export default function App() {
               setOrderFilter((f) => ({ ...f, thisThread: true, q: "" }));
               setPanel("orders");
             }}
+            onOpenPerson={() => {
+              setPeopleKey(selectedId);
+              setPanel("people");
+            }}
             onSendInvoice={(id) => void sendInvoice(id)}
             onSendQuote={(id) => void sendQuote(id)}
-            onMarkPaid={(id) => void setOrderLifecycle(id, "paid")}
+            onLargerQuote={(id) => void largerQuote(id)}
+            onMarkPaid={(id, rail) => void markOrderPaid(id, rail)}
+            payment={paymentHandles}
             onToggleFavorite={(next) => {
               void (async () => {
                 const res = isGroupThread(selectedId)

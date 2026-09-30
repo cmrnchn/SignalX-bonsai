@@ -369,6 +369,13 @@ export interface OrderLine {
   sell_option_label?: string;
 }
 
+export interface PaymentHandles {
+  cash_app: string;
+  venmo: string;
+  cash_note: string;
+  monero: string;
+}
+
 export interface Order {
   id: string;
   customer_id: string;
@@ -378,6 +385,7 @@ export interface Order {
   total_cents: number;
   created_at: number;
   updated_at: number;
+  payment_rail?: string;
 }
 
 function humanizeIpcError(e: unknown): string {
@@ -624,6 +632,12 @@ export const api = {
     call<Order>("cmd_duplicate_order_as_draft", { id }),
   setOrderStatus: (id: string, status: string) =>
     call<Order>("cmd_set_order_status", { id, status }),
+  markOrderPaid: (id: string, rail: string) =>
+    call<Order>("cmd_mark_order_paid", { id, rail }),
+  getPaymentHandles: () =>
+    call<PaymentHandles>("cmd_get_payment_handles"),
+  setPaymentHandles: (handles: PaymentHandles) =>
+    call<PaymentHandles>("cmd_set_payment_handles", { handles }),
   sendOrderInvoice: (id: string) => call<Order>("cmd_send_order_invoice", { id }),
   sendOrderQuote: (id: string) => call<Order>("cmd_send_order_quote", { id }),
   listCommerceAudit: (limit = 100) =>
