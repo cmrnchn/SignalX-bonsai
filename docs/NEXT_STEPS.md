@@ -1,243 +1,128 @@
-# SignalX Desktop - Complete Next Steps
+# SignalX - Next Steps
 
-## ✅ What's Done
+GUI rebuild Phases 1–5 (shell, commands, messaging UI, AI draft, guarded
+auto-reply) are in place. Foundation hardening pins the app to one Signal
+account and one outbox send path.
 
-All core features are implemented and building successfully:
-- ✅ Enhanced Health Badge (time-based colors + tooltips)
-- ✅ Production Build (working, tested)
-- ✅ Export Tools (TXT/JSON with Open Folder)
-- ✅ All backend commands functional
-- ✅ Event-driven architecture (no polling)
+Commerce-depth Phases 1–4 (below) are implemented: IVR menu editor, quotes/drafts,
+inventory ops, and Sales console.
 
-## 🎯 Immediate Actions (Do These Now)
+## Shipped product work (Phases 1–9 + commerce depth)
 
-### 1. Smoke Test (5 minutes) ⚡
+1. ~~Menu responder (IVR)~~
+2. ~~Catalog + customers~~
+3. ~~Orders + invoices in-thread~~
+4. ~~IVR order-taking~~ (menu v3: pick product # → qty → order + invoice via outbox)
+5. ~~In-app device link~~ (Settings → Device link; `signal-cli link` IPC; scripts under `scripts/` as fallback)
+6. ~~AI / IVR commerce copy polish~~ + dark Bonsai shell, soft setup banner, in-app QR
+7. ~~Order lifecycle (`paid` / `fulfilled` / `cancelled`) + Outbox cockpit + outbound attachments~~
+8. ~~Profile context rail + AI quick actions~~ (Messages 4th column; orders-backed standing/ledger; `cmd_suggest_thread_actions`)
+9. ~~Backup / migrate~~ (Settings → System; `cmd_export_data_bundle` / `cmd_import_data_bundle`)
+10. ~~IVR commerce editor~~ (Settings → IVR menus JSON; `order_status`; hide zero-stock)
+11. ~~Quotes / draft orders~~ (Create quote → Send quote → Confirm; stock decrements on confirm only)
+12. ~~Inventory ops~~ (stock ± with reason, low-stock threshold + filter, CSV import/export)
+13. ~~Sales console~~ (Sales nav: totals / top products / commerce audit; Duplicate as draft)
+
+14. ~~PIN-gated multi-account session switch~~ (one live identity; roster unlock; shop data per number)
+
+## Operator GUI notes
+
+- Dark zinc shell (shadcn-style): flush columns, Inter + JetBrains Mono, 14px base, 8px radius.
+- Primary actions are white-on-zinc; status, health, and banners stay grayscale.
+- Setup banner when config/number missing or `NotRegistered` → Settings → Account.
+- Settings → Account: roster (add number + PIN), Device link, status.
+- Header account control: Lock / Switch account (PIN gate). Only one session is live.
+- IVR Settings includes a visual menu composer (node rail, digit branches, dial-pad preview); JSON under Advanced.
+- IVR: master switch, allowlist, hide zero-stock, menus JSON editor (Save / Reset demo / Preview).
+- Orders: Place order (confirmed) or Create quote (draft); draft → Send quote / Confirm / Edit qty.
+- Catalog: low-stock threshold, ± stock adjust, Below threshold filter, CSV export/import.
+- Sales: period + status filters, revenue totals, top products, commerce audit, Reorder → draft.
+- Thread header shows when Menu IVR is armed but global is off.
+- Messages: profile context rail (standing with 7-day At risk, notes, AI, ledger, Send quote).
+- Settings → Backup: export/import data bundle (zip); chat-only export unchanged.
+
+## Long-term backlog (not next)
+
+**Messenger completeness**
+- Inbound Signal attachments (persist + render; profile rail Media)
+- Multi-file outbound / voice notes
+- Contact photos + real Apple Contacts
+- Keyboard shortcuts
+- Refresh `figma-handoff/` to 4-column + Outbox + Backup + Sales
+
+**Operator reliability**
+- Unified Audit panel (IVR + commerce + outbox + auto-reply)
+- Backup v2: encrypted zip, scheduled local backups, optional identity-pack
+- Packaging / signed macOS build / launcher polish
+
+**AI / automation**
+- Rule-based workflows (keyword / time → outbox template)
+- Scheduled outbound messages
+- Richer guarded auto-reply policies
+
+**Stretch**
+- TUI mode (`--tui`)
+- External inventory webhooks beyond CSV
+- Payment processor (only if explicitly reopened)
+
+**Still rejected**
+- Concurrent sessions / two live receive loops
+- Shared catalog across numbers
+- Native Signal bot buttons as primary IVR
+- Auto-send from AI chips
+
+## Live IVR order smoke (manual)
+
+1. Add ≥1 product with stock in Catalog.
+2. Settings → IVR → enable Menu IVR + allowlist the buyer thread (or disable allowlist).
+3. From another Signal device: `1` browse, `2` order → product # → qty; `4` check order.
+4. Confirm invoice text arrives and Orders panel shows the order.
+
+## Quotes smoke (manual)
+
+1. Orders → Create quote on a DM → status `draft` (stock unchanged).
+2. Send quote → Confirm → stock decrements once; Send invoice works after confirm.
+
+## Inventory / Sales smoke (manual)
+
+1. Catalog → set low-stock threshold → Adjust −1 → filter Below threshold.
+2. Export CSV → tweak a row → Import dry-run → Import confirm.
+3. Sales → Last 30 days → see totals; Reorder → new draft.
+
+## Device link smoke (manual)
+
+1. Ensure `.signalx.env` has `SIGNALX_SIGNALCLI_CONFIG` (and a usable `signal-cli`).
+2. If the rail shows **Link this Mac**, open it (or Settings → Account).
+3. Start linking → scan the in-app QR from Signal → Linked devices (or Copy URI).
+4. Wait for LINKED; add the number to the roster with a PIN (Settings → Account) and Unlock — receive/outbox start for that identity only.
+
+## Session switch smoke (manual)
+
+1. Settings → Account → add a second linked number with a PIN.
+2. Rail → Switch account… → pick the other card → enter PIN.
+3. Confirm catalog/orders/IVR are the other shop; previous stock unchanged.
+4. Outbox cockpit only claims items for the unlocked number.
+
+## AI setup (optional)
+
 ```bash
-# Launch the app
-./scripts/dev/SignalX-Dev.command
+./scripts/setup-ai.sh
+# set SIGNALX_OLLAMA_MODEL in .signalx.env
 ```
 
-**Verify**:
-- [ ] App launches without errors
-- [ ] Active account appears in dropdown
-- [ ] Health badge shows in sidebar
-- [ ] Threads list appears
-- [ ] Can select a thread and see messages
-- [ ] Can send a message
-- [ ] Incoming message appears (test from another Signal device)
-- [ ] Restart app → history persists
+Draft reply uses a commerce/IVR-aware prompt; still fills composer only (never auto-sends).
 
-**If issues**: Check `run-dev.command.log` (last 30 lines)
+## Profile rail smoke (manual)
 
-### 2. Feature Verification (2 minutes)
-```bash
-./scripts/testing/test-features.sh
-```
+1. Messages → open a DM → confirm 4th column (identity, standing, ledger, media).
+2. Draft on thread: Send latest quote chip; stale confirmed (>7d) → At risk.
+3. AI off: quick actions show commerce fallbacks; Summarize/Draft chips disabled or absent.
+4. AI on (`./scripts/setup-ai.sh`): Refresh summary + Draft chip fills composer (does not send).
 
-This script checks:
-- Environment configuration
-- Dependencies (signal-cli, ollama)
-- Build artifacts
-- Data directories
+## Backup / migrate smoke (manual)
 
-### 3. Test New Features (5 minutes)
-
-#### Health Badge
-- [ ] Badge shows correct color (green/yellow/red)
-- [ ] Hover tooltip shows diagnostics
-- [ ] Badge updates in real-time
-
-#### Export Tools
-- [ ] Select a thread with messages
-- [ ] Click "Export TXT" → file created, path shown
-- [ ] Click "Open Folder" → Finder opens
-- [ ] Click "Export JSON" → JSON file created
-- [ ] Verify exported files are readable
-
-### 4. Production Build Test (2 minutes)
-```bash
-# Verify build exists
-./scripts/testing/verify-build.sh
-
-# Launch production app
-open src-tauri/target/release/bundle/macos/SignalX.app
-```
-
-**Verify**:
-- [ ] App launches without dev server
-- [ ] All features work (same as dev mode)
-- [ ] No console errors
-
-## 🔧 Optional: AI Tools Setup
-
-### Quick Setup
-```bash
-./scripts/setup/setup-ai.sh
-```
-
-This will:
-1. Install Ollama (if needed)
-2. Pull a language model
-3. Configure `.signalx.env`
-
-### Manual Setup
-```bash
-# Install Ollama
-brew install ollama
-
-# Pull model
-ollama pull qwen2.5:7b-instruct
-
-# Update .signalx.env
-echo "SIGNALX_OLLAMA_MODEL=qwen2.5:7b-instruct" >> .signalx.env
-```
-
-### Test AI Features
-- [ ] Select a thread with messages
-- [ ] Click "Summarize" → shows summary
-- [ ] Click "Draft" → fills composer (doesn't auto-send)
-
-## 📋 Complete Testing Checklist
-
-### Core Functionality
-- [ ] Account switching works
-- [ ] Threads load and open
-- [ ] Unread counts update when opening thread
-- [ ] App restart preserves history
-- [ ] Search returns results
-- [ ] Aliases can be set and retrieved
-
-### New Features
-- [ ] Health badge shows correct status
-- [ ] Health badge tooltip works
-- [ ] Export TXT creates readable file
-- [ ] Export JSON creates valid JSON
-- [ ] Open Folder button works
-
-### AI Features (if configured)
-- [ ] Summarize produces readable output
-- [ ] Draft fills composer only
-- [ ] AI never auto-sends messages
-
-## 🐛 Troubleshooting
-
-### App Won't Launch
-```bash
-# Check logs
-tail -30 run-dev.command.log
-
-# Verify config
-cat .signalx.env
-
-# Check dependencies
-./scripts/testing/test-features.sh
-```
-
-### Messages Not Appearing
-1. Check Health badge (should be green)
-2. Verify `SIGNALX_NUMBER` in `.signalx.env`
-3. Check Diagnostics panel (click "Diag")
-4. Verify signal-cli is working: `signal-cli -u YOURNUMBER receive`
-
-### Export Issues
-1. Verify thread has messages
-2. Check export directory: `~/Library/Application Support/SignalX/export/`
-3. Check console for errors
-
-### Build Issues
-```bash
-# Clean and rebuild
-cd src-tauri
-cargo clean
-cd ..
-npm run tauri:build
-```
-
-## 📁 Key Files & Directories
-
-### Project Files
-- `scripts/dev/SignalX-Dev.command` - Dev launcher (double-click to run)
-- `.signalx.env` - Configuration
-- `run-dev.command.log` - Dev logs
-- `docs/STATUS.md` - Implementation status
-- `docs/QUICKSTART.md` - Quick reference
-
-### App Data
-- `~/Library/Application Support/SignalX/threads/` - Thread state
-- `~/Library/Application Support/SignalX/aliases/` - Contact aliases
-- `~/Library/Application Support/SignalX/export/` - Exported files
-
-### Build Output
-- `src-tauri/target/release/bundle/macos/SignalX.app` - Production app
-- `src-tauri/target/release/bundle/dmg/` - DMG installer
-
-## 🚀 Daily Workflow
-
-### Development
-```bash
-# Start dev mode
-./scripts/dev/SignalX-Dev.command
-
-# Or manually:
-npm run tauri:dev
-```
-
-### Production
-```bash
-# Build
-npm run tauri:build
-
-# Launch
-open src-tauri/target/release/bundle/macos/SignalX.app
-```
-
-## 📊 Health Monitoring
-
-The Health badge in the sidebar shows:
-- **Green**: Receiving messages successfully (< 15s since last success)
-- **Yellow**: Degraded (15-60s) or in cooldown
-- **Red**: Error (> 60s or failures > 0)
-
-Hover for details:
-- Time since last success
-- Backoff milliseconds
-- Consecutive failures
-- Last error message
-
-## 🎓 Next Development Tasks
-
-If you want to extend SignalX:
-
-1. **Group Messaging**: Currently DM-only, add group support
-2. **Media Handling**: Add image/video support
-3. **Notifications**: Desktop notifications for new messages
-4. **Themes**: Customizable UI themes
-5. **Keyboard Shortcuts**: Power user shortcuts
-6. **Message Reactions**: Add emoji reactions
-7. **Thread Search**: Search within a specific thread
-
-See `HANDOFF.md` for detailed task breakdowns.
-
-## ✅ Success Criteria
-
-SignalX is ready for daily use when:
-- ✅ All smoke tests pass
-- ✅ Health badge shows green during normal operation
-- ✅ Messages send/receive reliably
-- ✅ Export works for backup
-- ✅ Production build runs independently
-- ✅ History persists across restarts
-
-## 📞 Support
-
-If you encounter issues:
-1. Check `run-dev.command.log`
-2. Review Diagnostics panel in app
-3. Run `./scripts/testing/test-features.sh` for system check
-4. Verify Health badge status
-
----
-
-**You're all set!** Start with the smoke test and work through the checklist. All features are implemented and ready to use.
-
-
+1. Settings → System → Backup → **Export data bundle** → confirm zip under app `exports/` opens.
+2. Optionally wipe or use a copy of app data; **Import** with Replace → confirm → Quit now → reopen.
+3. Catalog, customers, orders, IVR settings, and threads match the bundle; `.signalx.env` / signal-cli were not required inside the zip.
+4. Merge smoke: export, change a product name locally, import Merge with overlapping product id → incoming upserts; messages with same id keep local content.
+5. Rail **Export chat** still exports messages-only (unchanged).

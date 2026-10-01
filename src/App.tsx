@@ -1,3790 +1,3144 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { invoke, listen, isTauriAvailable } from "./utils/tauri";
-import "./App.css";
-import { ToolsPanel } from "./components/ToolsPanel";
-import { SettingsModal } from "./components/SettingsModal";
-import { NewMessageModal } from "./components/NewMessageModal";
-import { LinkAccountModal } from "./components/LinkAccountModal";
-import SkipLink from "./components/SkipLink";
-import { ToastContainer } from "./components/Toast";
-import { useToast } from "./hooks/useToast";
-import { logWithScope } from "./utils/logger";
-import { getUserFriendlyMessage } from "./utils/errorHandler";
-import { useAutomation } from "./hooks/useAutomation";
-import { usePlugins, usePluginThreadSelection } from "./hooks/usePlugins";
-import { Input, Button, Select, Spinner, Checkbox } from "./components/primitives";
-import { OutboxStatus } from "./components/OutboxStatus";
-import { useBackendEvents } from "./hooks/useBackendEvents";
-import { OnboardingTour } from "./components/OnboardingTour";
-import { useOnboarding } from "./hooks/useOnboarding";
-import { FeatureHint } from "./components/FeatureHint";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  api,
+  errMsg,
+  isDesktopUnavailable,
+  onEvent,
+  unwrap,
+  type AiStatus,
+  type AutoReplyAuditEntry,
+  type AutoReplySettings,
+  type CommerceAuditEvent,
+  type SimpleAuditEntry,
+  type ContactMeta,
+  type Customer,
+  type Diagnostics,
+  type DeviceLinkStatus,
+  type DeviceLinkUri,
+  type GroupMeta,
+  type IvrMenus,
+  type IvrPreviewStep,
+  type IvrSettings,
+  type Message,
+  type Order,
+  type OutboxItem,
+  type OutboxSummary,
+  type Product,
+  type ReceiveLoopState,
+  type SalesSummary,
+  type SearchResult,
+  type SessionStatus,
+  type ThreadAutoReplyStatus,
+  type ThreadIvrStatus,
+  type ThreadSummary,
+} from "./api";
+import {
+  USE_FIXTURES,
+  fxAudit,
+  fxIvrAudit,
+  fxOutboxAudit,
+  fxCommerceAudit,
+  fxContacts,
+  fxCustomers,
+  fxGroups,
+  fxMessages,
+  fxOrders,
+  fxOutbox,
+  fxProductImages,
+  fxProducts,
+  fxSalesSummary,
+  fxSearchHits,
+  fxThreads,
+} from "./devFixtures";
+import { emptyMenus } from "./IvrMenuComposer";
+import { ProfileRail } from "./ProfileRail";
+import { Composer } from "./components/Inbox/Composer";
+import { ConvoHeader } from "./components/Inbox/ConvoHeader";
+import { MessageList } from "./components/Inbox/MessageList";
+import { EMPTY_THREAD_FILTER, ThreadList, type ThreadFilter } from "./components/Inbox/ThreadList";
+import { CatalogScreen } from "./components/Catalog/CatalogScreen";
+import { SearchScreen } from "./components/Search/SearchScreen";
+import { SearchOverlay } from "./components/SearchOverlay";
+import { PeopleScreen } from "./components/People/PeopleScreen";
+import { buildDirectory } from "./components/People/people";
+import { PageDashboard, PageNoticeBar } from "./components/Dashboard/PageDashboard";
+import { catalogDashboard, homeDashboard, messagesDashboard, ordersDashboard, peopleDashboard } from "./components/Dashboard/dashboards";
+import { matchingMessages, matchingOrders, matchingPeople, matchingProducts, type SearchScope } from "./globalSearch";
+import { OrdersScreen, EMPTY_ORDER_FILTER, type OrderFilterState } from "./components/Orders/OrdersScreen";
+import { SalesScreen } from "./components/Sales/SalesScreen";
+import { OutboxScreen } from "./components/Outbox/OutboxScreen";
+import { AccountSettings } from "./components/Settings/AccountSettings";
+import { AutoReplySettings as AutoReplySettingsTab } from "./components/Settings/AutoReplySettings";
+import { BackupSettings } from "./components/Settings/BackupSettings";
+import { BuyerMenuSettings } from "./components/Settings/BuyerMenuSettings";
+import { SettingsScreen, type SettingsTab } from "./components/Settings/SettingsScreen";
+import { PanelResizer } from "./components/PanelResizer";
+import {
+  avatarTint,
+  fmtTime,
+  formatPhone,
+  formatQty,
+  initials,
+  isGroupThread,
+  stockQtyFromMilli,
+  threadTitle,
+} from "./format";
+import { canInvoke, isTauriRuntime } from "./runtime";
+import { usePanelWidths, type PanelLayout } from "./usePanelWidths";
+import { useEscapeLayer } from "./overlayEscape";
+import { useGlobalShortcuts } from "./useGlobalShortcuts";
+import { ShortcutsHelp } from "./components/ShortcutsHelp";
+import { AuditScreen } from "./components/Audit/AuditScreen";
+import { InvoiceExport } from "./components/InvoiceExport";
+import { FeedbackButton } from "./components/FeedbackButton";
+import { saveFeedback } from "./feedbackUtils";
+import {
+  IconAccount,
+  IconAudit,
+  IconCatalog,
+  IconContacts,
+  IconImage,
+  IconLink,
+  IconMessages,
+  IconOrders,
+  IconOutbox,
+  IconSales,
+  IconSearch,
+  IconX,
+  IconExport,
+  IconSettings,
+} from "./navIcons";
+import {
+  ContextMenu,
+  useContextMenu,
+  MenuEditor,
+  getMenuByObjectType,
+  updateMenu,
+  type MenuItem as ContextMenuItem,
+} from "./components/ContextMenu";
 
-type ApiResponse<T> =
-  | { success: true; data: T }
-  | { success: false; error: string };
+export type Panel =
+  | "threads"
+  | "search"
+  | "people"
+  | "catalog"
+  | "contacts"
+  | "groups"
+  | "products"
+  | "customers"
+  | "orders"
+  | "sales"
+  | "outbox"
+  | "audit"
+  | "invoice-export"
+  | "settings";
 
-async function unwrap<T>(p: Promise<any>, label: string): Promise<T> {
-  const res = (await p) as ApiResponse<T>;
-  if (!res || typeof res !== "object" || !("success" in res)) {
-    throw new Error(`${label}: invalid response`);
-  }
-  if (!res.success)
-    throw new Error(
-      `${label}: ${"error" in res ? res.error : "unknown error"}`
-    );
-  return res.data;
-}
-
-type Direction = "Incoming" | "Outgoing";
-
-export interface Message {
-  id: string;
-  thread_id: string;
-  timestamp: number;
-  sender: string;
-  recipient?: string | null;
-  content: string;
-  direction: Direction;
-  raw_json?: any | null;
-}
-
-export interface ThreadSummary {
-  id: string;
-  participants: string[];
-  last_message_timestamp: number;
-  unread_count: number;
-  message_count: number;
-  outbox_count?: number;
-}
-
-type AccountChangedPayload = { account_id: string };
-
-type Diagnostics = {
-  env_path: string | null;
-  app_data_dir: string;
-  threads_dir: string;
-  aliases_dir: string;
-  search_dir: string;
-  signal_cli_path: string;
-  signal_cli_version: string | null;
-  signal_cli_usable: boolean;
-  signal_cli_last_error: string | null;
-  config_path: string | null;
-  number: string | null;
-  active_account: string | null;
-};
-
-type ReceiveLoopState = {
-  last_receive_ok_at: number | null;
-  last_receive_error: string | null;
-  consecutive_failures: number;
-  backoff_ms: number;
-  cooldown_until: number | null;
-};
-
-type AliasMap = Record<string, string>; // number -> alias
-
-type SearchResult = {
-  message_id: string;
-  thread_id: string;
-  timestamp: number;
-  sender: string;
-  snippet: string;
-  offset: number;
-};
-
-type PendingReply = {
-  message_id: string;
-  thread_id: string;
-  draft: string;
-  intent: string;
-  created_at: number;
-};
-
-type OutboxState = "queued" | "sending" | "sent" | "failed";
-type OutboxItem = {
-  id: string;
-  account_id: string;
-  thread_id: string;
-  recipient: string;
-  content: string;
-  created_at: number;
-  last_attempt_at: number | null;
-  attempt_count: number;
-  last_error: string | null;
-  state: OutboxState;
-};
-
-type OutboxSummary = {
-  queued: number;
-  sending: number;
-  failed: number;
-};
-
-type CustomField = {
-  id: string; // stable uuid
+type SellPackRow = {
   key: string;
-  type: "text" | "number" | "bool" | "date" | "tag";
-  searchable: boolean;
-  value: string; // normalized string form
+  id?: string;
+  label: string;
+  amount: string;
+  unit: string;
+  price: string;
 };
 
-type ContactMeta = {
-  contact_id: string;
-  display_name: string | null;
-  alias: string | null;
-  categories: string[];
-  favorite: boolean;
-  muted: boolean;
-  icon: string | null;
-  photo_path: string | null;
-  apple_contact_id: string | null;
-  custom_fields: CustomField[];
-  updated_at: number;
-};
+const UNIT_OPTIONS = ["ea", "g", "kg", "oz", "lb", "ml", "l"] as const;
 
-type ContactMetaPatch = {
-  display_name?: string | null;
-  alias?: string | null;
-  categories?: string[];
-  favorite?: boolean;
-  muted?: boolean;
-  icon?: string | null;
-  apple_contact_id?: string | null;
-  custom_fields?: CustomField[];
-};
-
-type GroupMeta = {
-  group_id: string;
-  display_name: string | null;
-  categories: string[];
-  favorite: boolean;
-  muted: boolean;
-  icon: string | null;
-  custom_fields: CustomField[];
-  member_notes: string[];
-  updated_at: number;
-};
-
-type GroupMetaPatch = {
-  display_name?: string | null;
-  categories?: string[];
-  favorite?: boolean;
-  muted?: boolean;
-  icon?: string | null;
-  custom_fields?: CustomField[];
-  member_notes?: string[];
-};
-
-// -----------------------------
-// Welcome visuals: WebGL wavy lines background
-// -----------------------------
-const vertexShaderSource = `
-  attribute vec4 aVertexPosition;
-  attribute vec2 aTextureCoord;
-  varying vec2 vTextureCoord;
-  void main() {
-    gl_Position = aVertexPosition;
-    vTextureCoord = aTextureCoord;
-  }
-`;
-
-const fragmentShaderSource = `
-  precision mediump float;
-  uniform vec2 iResolution;
-  uniform float iTime;
-  uniform vec2 iMouse;
-  varying vec2 vTextureCoord;
-
-  #define PI 3.14159265359
-
-  float hash(float n) { return fract(sin(n) * 43758.5453); }
-
-  float noise(vec2 p) {
-    vec2 i = floor(p);
-    vec2 f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-    float a = hash(i.x + i.y * 57.0);
-    float b = hash(i.x + 1.0 + i.y * 57.0);
-    float c = hash(i.x + i.y * 57.0 + 1.0);
-    float d = hash(i.x + 1.0 + i.y * 57.0 + 1.0);
-    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
-  }
-
-  float fbm(vec2 p) {
-    float sum = 0.0;
-    float amp = 0.5;
-    float freq = 1.0;
-    for(int i = 0; i < 6; i++) {
-      sum += amp * noise(p * freq);
-      amp *= 0.5;
-      freq *= 2.0;
-    }
-    return sum;
-  }
-
-  float lines(vec2 uv, float thickness, float distortion) {
-    float y = uv.y;
-    float distortionAmount = distortion * fbm(vec2(uv.x * 2.0, y * 0.5 + iTime * 0.1));
-    y += distortionAmount;
-    float linePattern = fract(y * 20.0);
-    float line = smoothstep(0.5 - thickness, 0.5, linePattern) -
-                smoothstep(0.5, 0.5 + thickness, linePattern);
-    return line;
-  }
-
-  void mainImage(out vec4 fragColor, in vec2 fragCoord) {
-    vec2 uv = fragCoord / iResolution.xy;
-    float aspect = iResolution.x / iResolution.y;
-    uv.x *= aspect;
-
-    vec2 mousePos = iMouse.xy;
-    mousePos.x *= aspect;
-    float mouseDist = length(uv - mousePos);
-    float mouseInfluence = smoothstep(0.5, 0.0, mouseDist);
-
-    float baseThickness = 0.05;
-    float baseDistortion = 0.2;
-
-    float thickness = mix(baseThickness, baseThickness * 1.5, mouseInfluence);
-    float distortion = mix(baseDistortion, baseDistortion * 2.0, mouseInfluence);
-
-    float line = lines(uv, thickness, distortion);
-
-    float timeOffset = sin(iTime * 0.2) * 0.1;
-    float animatedLine = lines(uv + vec2(timeOffset, 0.0), thickness, distortion);
-
-    line = mix(line, animatedLine, 0.3);
-
-    vec3 backgroundColor = vec3(0.0, 0.0, 0.0);
-    vec3 lineColor = vec3(1.0, 1.0, 1.0);
-
-    vec3 finalColor = mix(backgroundColor, lineColor, line);
-    finalColor += vec3(0.1, 0.1, 0.1) * mouseInfluence * line;
-
-    fragColor = vec4(finalColor, 1.0);
-  }
-
-  void main() {
-    vec2 fragCoord = vTextureCoord * iResolution;
-    vec4 color;
-    mainImage(color, fragCoord);
-    gl_FragColor = color;
-  }
-`;
-
-function ShaderBackground() {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const gl = canvas.getContext("webgl");
-    if (!gl) return;
-
-    const createShader = (type: number, source: string) => {
-      const shader = gl.createShader(type);
-      if (!shader) return null;
-      gl.shaderSource(shader, source);
-      gl.compileShader(shader);
-      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-        console.error(gl.getShaderInfoLog(shader) || "Shader compile error");
-        gl.deleteShader(shader);
-        return null;
-      }
-      return shader;
-    };
-
-    const vertexShader = createShader(gl.VERTEX_SHADER, vertexShaderSource);
-    const fragmentShader = createShader(
-      gl.FRAGMENT_SHADER,
-      fragmentShaderSource
-    );
-    if (!vertexShader || !fragmentShader) return;
-
-    const program = gl.createProgram();
-    if (!program) return;
-    gl.attachShader(program, vertexShader);
-    gl.attachShader(program, fragmentShader);
-    gl.linkProgram(program);
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-      console.error(gl.getProgramInfoLog(program) || "Program link error");
-      return;
-    }
-
-    const positionBuffer = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
-    gl.bufferData(
-      gl.ARRAY_BUFFER,
-      new Float32Array([-1, -1, 1, -1, 1, 1, -1, 1]),
-      gl.STATIC_DRAW
-    );
-
-    const texCoordBuffer = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, texCoordBuffer);
-    gl.bufferData(
-      gl.ARRAY_BUFFER,
-      new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]),
-      gl.STATIC_DRAW
-    );
-
-    const indexBuffer = gl.createBuffer();
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
-    gl.bufferData(
-      gl.ELEMENT_ARRAY_BUFFER,
-      new Uint16Array([0, 1, 2, 0, 2, 3]),
-      gl.STATIC_DRAW
-    );
-
-    const positionLoc = gl.getAttribLocation(program, "aVertexPosition");
-    const texCoordLoc = gl.getAttribLocation(program, "aTextureCoord");
-    const resolutionLoc = gl.getUniformLocation(program, "iResolution");
-    const timeLoc = gl.getUniformLocation(program, "iTime");
-    const mouseLoc = gl.getUniformLocation(program, "iMouse");
-
-    let mouseX = 0.5;
-    let mouseY = 0.5;
-    const onMouseMove = (e: MouseEvent) => {
-      mouseX = e.clientX / window.innerWidth;
-      mouseY = 1 - e.clientY / window.innerHeight;
-    };
-    window.addEventListener("mousemove", onMouseMove);
-
-    const resize = () => {
-      canvas.width = window.innerWidth;
-      canvas.height = window.innerHeight;
-      gl.viewport(0, 0, canvas.width, canvas.height);
-    };
-    window.addEventListener("resize", resize);
-    resize();
-
-    const startTime = Date.now();
-    let rafId = 0;
-    const render = () => {
-      const time = (Date.now() - startTime) / 1000;
-      gl.clearColor(0, 0, 0, 1);
-      gl.clear(gl.COLOR_BUFFER_BIT);
-      gl.useProgram(program);
-
-      gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
-      gl.vertexAttribPointer(positionLoc, 2, gl.FLOAT, false, 0, 0);
-      gl.enableVertexAttribArray(positionLoc);
-
-      gl.bindBuffer(gl.ARRAY_BUFFER, texCoordBuffer);
-      gl.vertexAttribPointer(texCoordLoc, 2, gl.FLOAT, false, 0, 0);
-      gl.enableVertexAttribArray(texCoordLoc);
-
-      gl.uniform2f(resolutionLoc, canvas.width, canvas.height);
-      gl.uniform1f(timeLoc, time);
-      gl.uniform2f(mouseLoc, mouseX, mouseY);
-
-      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
-      gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
-
-      rafId = requestAnimationFrame(render);
-    };
-    rafId = requestAnimationFrame(render);
-
-    return () => {
-      cancelAnimationFrame(rafId);
-      window.removeEventListener("resize", resize);
-      window.removeEventListener("mousemove", onMouseMove);
-      gl.deleteProgram(program);
-      gl.deleteShader(vertexShader);
-      gl.deleteShader(fragmentShader);
-      if (positionBuffer) gl.deleteBuffer(positionBuffer);
-      if (texCoordBuffer) gl.deleteBuffer(texCoordBuffer);
-      if (indexBuffer) gl.deleteBuffer(indexBuffer);
-    };
-  }, []);
-
-  return (
-    <canvas
-      ref={canvasRef}
-      style={{
-        position: "fixed",
-        inset: 0,
-        width: "100vw",
-        height: "100vh",
-        display: "block",
-        zIndex: 0,
-        pointerEvents: "none",
-      }}
-    />
-  );
+function newPackRow(): SellPackRow {
+  return {
+    key: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    label: "",
+    amount: "",
+    unit: "oz",
+    price: "",
+  };
 }
 
-function avatarForAccount(id: string) {
-  const letter = id.trim().charAt(0).toUpperCase() || "?";
-  const colors = [
-    "#38bdf8",
-    "#a78bfa",
-    "#22c55e",
-    "#f472b6",
-    "#f59e0b",
-    "#eab308",
-  ];
-  const color = colors[id.length % colors.length];
-  return (
-    <div
-      style={{
-        width: 48,
-        height: 48,
-        borderRadius: "50%",
-        background: color,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        color: "#0b0d10",
-        fontWeight: 800,
-        fontSize: 18,
-        boxShadow: "0 10px 30px rgba(0,0,0,0.25)",
-      }}
-    >
-      {letter}
-    </div>
-  );
+type NavItem = { id: Panel; label: string; ico: ReactNode };
+
+/** Grouped so related destinations read as a set rather than a flat list. */
+const NAV_GROUPS: NavItem[][] = [
+  [{ id: "threads", label: "Messages", ico: <IconMessages /> }],
+  [{ id: "people", label: "People", ico: <IconContacts /> }],
+  [
+    { id: "catalog", label: "Catalog", ico: <IconCatalog /> },
+    { id: "orders", label: "Orders", ico: <IconOrders /> },
+    { id: "sales", label: "Sales", ico: <IconSales /> },
+    { id: "invoice-export", label: "Export", ico: <IconExport /> },
+  ],
+  [
+    { id: "outbox", label: "Outbox", ico: <IconOutbox /> },
+    { id: "audit", label: "Audit", ico: <IconAudit /> },
+  ],
+  [{ id: "settings", label: "Settings", ico: <IconSettings /> }],
+];
+
+
+
+
+function needsDeviceSetup(
+  diagnostics: Diagnostics | null,
+  health: ReceiveLoopState | null,
+  linkStatus: DeviceLinkStatus | null,
+): boolean {
+  if (linkStatus?.state === "success" && diagnostics?.number) return false;
+  if (!diagnostics?.config_path) return true;
+  if (!diagnostics?.number) return true;
+  const blob = `${diagnostics.signal_cli_last_error ?? ""} ${health?.last_receive_error ?? ""}`;
+  return /notregistered/i.test(blob);
 }
 
-function WelcomeOverlay({
-  accounts,
-  selectedAccount,
-  onSelectAccount,
-  onEnter,
-  error,
-}: {
-  accounts: string[];
-  selectedAccount: string | null;
-  onSelectAccount: (id: string) => void;
-  onEnter: () => void;
-  error?: string | null;
-}) {
-  const canEnter = Boolean(selectedAccount);
-  return (
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        zIndex: 999,
-        color: "#e5e7eb",
-        overflow: "hidden",
-      }}
-    >
-      <ShaderBackground />
-      <div
-        style={{
-          position: "absolute",
-          inset: 0,
-          background:
-            "radial-gradient(circle at 20% 20%, rgba(59,130,246,0.16), transparent 45%), radial-gradient(circle at 80% 30%, rgba(16,185,129,0.14), transparent 40%), linear-gradient(135deg, rgba(0,0,0,0.75), rgba(0,0,0,0.65))",
-          backdropFilter: "blur(2px)",
-        }}
-      />
-      <div
-        style={{
-          position: "relative",
-          zIndex: 1,
-          height: "100%",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          padding: "24px",
-        }}
-      >
-        <div
-          style={{
-            maxWidth: 720,
-            width: "100%",
-            background: "rgba(15, 23, 42, 0.72)",
-            border: "1px solid rgba(148, 163, 184, 0.2)",
-            borderRadius: 18,
-            boxShadow: "0 30px 80px rgba(0,0,0,0.45)",
-            padding: 28,
-          }}
-        >
-          <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-            <div>
-              <div
-                style={{
-                  fontSize: 13,
-                  letterSpacing: 1,
-                  color: "#9ca3af",
-                  textTransform: "uppercase",
-                }}
-              >
-                SignalX Desktop
-              </div>
-              <div style={{ fontSize: 34, fontWeight: 800, marginTop: 6 }}>
-                Welcome.
-              </div>
-              <div style={{ marginTop: 8, color: "#cbd5e1", lineHeight: 1.5 }}>
-                Threads hum quietly. Choose your presence, whisper the key, and
-                step inside.
-              </div>
-            </div>
+/** Receive polls every ~2s; treat success older than this as stale. */
+const HEALTH_OK_MS = 30_000;
+const HEALTH_STALE_MS = 120_000;
 
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
-                gap: 12,
-              }}
-            >
-              {accounts.length === 0 ? (
-                <>
-                  <div
-                    style={{
-                      padding: 12,
-                      borderRadius: 12,
-                      border: "1px solid rgba(148, 163, 184, 0.14)",
-                      background: "rgba(255,255,255,0.02)",
-                      color: "#94a3b8",
-                    }}
-                  >
-                    No accounts detected yet. Click "Add Account" below to link your Signal device.
-                  </div>
-                  <Button
-                    onClick={(e) => {
-                      e.stopPropagation(); // Prevent event bubbling
-                      console.log('Add Account button clicked!');
-                      console.log('Current showLinkAccount state:', showLinkAccount);
-                      setShowLinkAccount(true);
-                      setShowWelcome(false); // Hide welcome overlay when showing link modal
-                      console.log('showLinkAccount set to true, showWelcome set to false');
-                    }}
-                    variant="primary"
-                    size="md"
-                    style={{
-                      background: "linear-gradient(135deg, #0ea5e9, #22d3ee)",
-                      boxShadow: "0 10px 30px rgba(14,165,233,0.35)",
-                    }}
-                  >
-                    + Add Account
-                  </Button>
-                </>
-              ) : (
-                accounts.map((acc) => {
-                  const selected = selectedAccount === acc;
-                  return (
-                    <div
-                      key={acc}
-                      onClick={() => onSelectAccount(acc)}
-                      style={{
-                        padding: 14,
-                        borderRadius: 12,
-                        border: selected
-                          ? "1px solid #38bdf8"
-                          : "1px solid rgba(148,163,184,0.14)",
-                        background: selected
-                          ? "rgba(14,165,233,0.12)"
-                          : "rgba(255,255,255,0.02)",
-                        cursor: "pointer",
-                        display: "flex",
-                        gap: 12,
-                        alignItems: "center",
-                        transition: "border 120ms, background 120ms",
-                      }}
-                    >
-                      {avatarForAccount(acc)}
-                      <div
-                        style={{
-                          display: "flex",
-                          flexDirection: "column",
-                          gap: 4,
-                        }}
-                      >
-                        <div style={{ fontWeight: 700 }}>{acc}</div>
-                        <div style={{ color: "#94a3b8", fontSize: 12 }}>
-                          Tap to enter
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })
-              )}
-            </div>
-
-            <div
-              style={{
-                display: "flex",
-                gap: 12,
-                flexWrap: "wrap",
-                alignItems: "center",
-              }}
-            >
-              <div style={{ flex: 1, minWidth: 240 }}>
-                {error ? (
-                  <div style={{ fontSize: 12, color: "#fca5a5" }}>{error}</div>
-                ) : (
-                  <div style={{ fontSize: 12, color: "#9ca3af" }}>
-                    Select an account above to continue.
-                  </div>
-                )}
-              </div>
-              <Button
-                onClick={onEnter}
-                disabled={!canEnter}
-                variant="primary"
-                size="lg"
-                style={{
-                  minWidth: 140,
-                  background: !canEnter
-                    ? undefined
-                    : "linear-gradient(135deg, #0ea5e9, #22d3ee)",
-                  boxShadow: !canEnter
-                    ? "none"
-                    : "0 10px 30px rgba(14,165,233,0.35)",
-                }}
-              >
-                Enter
-              </Button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function fmtTime(ts: number) {
-  try {
-    return new Date(ts).toLocaleString();
-  } catch {
-    return String(ts);
+function healthLabel(s: ReceiveLoopState | null): string {
+  if (!s) return "Connecting…";
+  if (s.cooldown_until && s.cooldown_until > Date.now()) return "Self-heal cooldown";
+  if (s.last_receive_error) return s.last_receive_error.slice(0, 80);
+  if (s.last_receive_ok_at) {
+    const age = Date.now() - s.last_receive_ok_at;
+    if (age <= HEALTH_OK_MS) return "Receive loop healthy";
+    if (age <= HEALTH_STALE_MS) return "Receive loop quiet";
+    return "Receive loop stale";
   }
+  return "Waiting for first receive";
+}
+
+
+function isEnvelopeNoiseContent(content: string): boolean {
+  const t = content.trim();
+  if (!t.startsWith("{")) return false;
+  if (t.includes('"receiptMessage"') || t.includes('"typingMessage"')) return true;
+  return t.includes('"envelope"') && t.includes('"source"');
+}
+
+
+function money(cents: number): string {
+  return `$${(cents / 100).toFixed(2)}`;
+}
+
+function productUnit(p: { unit?: string; base_unit?: string; sales_unit?: string }): string {
+  const sales = (p.sales_unit || "").trim().toLowerCase();
+  if (sales) return sales;
+  const base = (p.base_unit || p.unit || "ea").trim().toLowerCase();
+  return base || "ea";
+}
+
+function productBaseUnit(p: { unit?: string; base_unit?: string }): string {
+  const base = (p.base_unit || p.unit || "ea").trim().toLowerCase();
+  return base || "ea";
+}
+
+function productPriceLabel(p: Product): string {
+  const base = productBaseUnit(p);
+  return base === "ea" ? money(p.price_cents) : `${money(p.price_cents)}/${base}`;
+}
+
+function productStockLabel(p: Product): string {
+  const milli = p.quantity_base_milli || 0;
+  const base = productBaseUnit(p);
+  const stockU = (p.stock_unit || "").trim().toLowerCase() || base;
+  if (!milli && p.quantity_in_stock != null) {
+    return stockU === "ea"
+      ? `${p.quantity_in_stock} left`
+      : `${p.quantity_in_stock} ${stockU} left`;
+  }
+  const shown = formatQty(stockQtyFromMilli(milli, stockU, base));
+  return stockU === "ea" ? `${shown} left` : `${shown} ${stockU} left`;
+}
+
+function lowStockThresholdLabel(milli: number): string {
+  if (!milli) return "";
+  const v = milli / 1000;
+  return Math.abs(v - Math.round(v)) < 0.001 ? String(Math.round(v)) : v.toFixed(3);
+}
+
+function productWeightLabel(p: Product): string | null {
+  if (!(p.weight > 0) || !p.weight_unit) return null;
+  const w = Number.isInteger(p.weight) ? String(p.weight) : p.weight.toFixed(2);
+  return `${w} ${p.weight_unit}`;
+}
+
+/** Normalize to E.164-ish (+digits). Returns null if invalid. */
+function normalizePhoneInput(raw: string): string | null {
+  const digits = raw.trim().replace(/[^\d+]/g, "");
+  if (!digits.startsWith("+")) return null;
+  const rest = digits.slice(1);
+  if (rest.length < 7 || rest.length > 15 || !/^\d+$/.test(rest)) return null;
+  return `+${rest}`;
+}
+
+async function fileToBase64(file: File): Promise<{ b64: string; ext: string }> {
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("read failed"));
+    reader.readAsDataURL(file);
+  });
+  const b64 = dataUrl.includes(",") ? dataUrl.split(",")[1]! : dataUrl;
+  const ext = (file.name.split(".").pop() || "jpg").toLowerCase();
+  return { b64, ext };
+}
+
+function orderStatusTone(status: string): "ok" | "warn" | "danger" | "muted" {
+  const s = status.toLowerCase();
+  if (s === "paid" || s === "fulfilled" || s === "completed") return "ok";
+  if (s === "cancelled" || s === "canceled" || s === "failed") return "danger";
+  if (s === "invoiced" || s === "sent" || s === "pending" || s === "confirmed") return "warn";
+  if (s === "draft") return "muted";
+  return "muted";
+}
+
+function ivrInactiveReason(ivr: ThreadIvrStatus | null): string | null {
+  if (!ivr || ivr.effective) return null;
+  if (ivr.handed_off) return null;
+  if (ivr.global_enabled === false) return "Buyer menu ready · turn it on in Settings";
+  if (!ivr.enabled) return null;
+  return "Buyer menu ready · waiting to activate";
+}
+
+function includesQ(hay: string, q: string): boolean {
+  if (!q.trim()) return true;
+  return hay.toLowerCase().includes(q.trim().toLowerCase());
 }
 
 export default function App() {
-  const { toasts, dismissToast, showError, showSuccess, showInfo } = useToast();
-  const logFn = logWithScope("App");
-  const log = {
-    info: (msg: string, meta?: Record<string, unknown>) => logFn('info', msg, meta),
-    warn: (msg: string, meta?: Record<string, unknown>) => logFn('warn', msg, meta),
-    error: (msg: string, meta?: unknown) => logFn('error', msg, typeof meta === 'object' ? meta as Record<string, unknown> : { error: meta }),
-    debug: (msg: string, meta?: Record<string, unknown>) => logFn('debug', msg, meta),
-  };
-  const addLog = (msg: string) => logFn("info", msg);
-  const [tauriAvailable, setTauriAvailable] = useState(isTauriAvailable());
-
-  useEffect(() => {
-    if (tauriAvailable) return;
-    const timer = window.setInterval(() => {
-      if (isTauriAvailable()) {
-        setTauriAvailable(true);
-        addLog("Tauri became available");
-      }
-    }, 500);
-    return () => window.clearInterval(timer);
-  }, [tauriAvailable]);
-
-  const [accounts, setAccounts] = useState<string[]>([]);
-  const [activeAccount, setActiveAccount] = useState<string | null>(null);
-  const [welcomeAccount, setWelcomeAccount] = useState<string | null>(null);
-  const [welcomeError, setWelcomeError] = useState<string | null>(null);
-
-  const [threads, setThreads] = useState<ThreadSummary[]>([]);
-  const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [composerText, setComposerText] = useState("");
-  const [showLinkAccount, setShowLinkAccount] = useState(false);
-  const [linkAccountStep, setLinkAccountStep] = useState<'phone' | 'qr' | 'done'>('phone');
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const [panel, setPanel] = useState<Panel>("threads");
+  const [accountNumber, setAccountNumber] = useState<string | null>(null);
+  const [session, setSession] = useState<SessionStatus | null>(null);
+  const [sessionPin, setSessionPin] = useState("");
+  const [unlockId, setUnlockId] = useState<string | null>(null);
+  const [unlockError, setUnlockError] = useState<string | null>(null);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const [addNumber, setAddNumber] = useState("");
+  const [addPin, setAddPin] = useState("");
+  const [addLabel, setAddLabel] = useState("");
+  const [rosterBusy, setRosterBusy] = useState(false);
+  const [diagnostics, setDiagnostics] = useState<Diagnostics | null>(null);
+  const [health, setHealth] = useState<ReceiveLoopState | null>(null);
+  const [ai, setAi] = useState<AiStatus | null>(null);
+  const [threadsReal, setThreads] = useState<ThreadSummary[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [messagesReal, setMessages] = useState<Message[]>([]);
+  const [outbox, setOutbox] = useState<OutboxItem[]>([]);
+  const [globalOutboxReal, setGlobalOutbox] = useState<OutboxItem[]>([]);
+  const [outboxSummary, setOutboxSummary] = useState<OutboxSummary | null>(null);
+  const [composer, setComposer] = useState("");
+  const [attachFile, setAttachFile] = useState<File | null>(null);
+  const [attachPreview, setAttachPreview] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
-
-  // Initialize plugins
-  usePlugins();
-  
-  // Notify plugins when thread selection changes
-  usePluginThreadSelection(selectedThreadId);
-
-  // Initialize automation
-  useAutomation((draft) => {
-    // When automation generates a draft, show it in the UI
-    if (selectedThreadId && draft.threadId === selectedThreadId) {
-      setComposerText(draft.content);
-      showInfo(`Automation draft ready (confidence: ${(draft.confidence * 100).toFixed(0)}%)`);
-    }
+  const [status, setStatusState] = useState<string | null>(null);
+  const setStatus = (msg: string | null) => {
+    if (msg && isDesktopUnavailable(msg)) return;
+    setStatusState(msg);
+  };
+  const [searchQ, setSearchQ] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchLiveQ, setSearchLiveQ] = useState("");
+  const [searchScope, setSearchScope] = useState<SearchScope>("messages");
+  const [peopleSearchQuery, setPeopleSearchQuery] = useState("");
+  const [peopleSearchTick, setPeopleSearchTick] = useState(0);
+  const [searchHitsReal, setSearchHits] = useState<SearchResult[]>([]);
+  const [contactsReal, setContacts] = useState<ContactMeta[]>([]);
+  const [groupsReal, setGroups] = useState<GroupMeta[]>([]);
+  const [summaryText, setSummaryText] = useState<string | null>(null);
+  const [aiBusy, setAiBusy] = useState(false);
+  const [autoSettings, setAutoSettings] = useState<AutoReplySettings | null>(null);
+  const [ivrSettings, setIvrSettings] = useState<IvrSettings | null>(null);
+  const [ivrMenusDraft, setIvrMenusDraft] = useState<IvrMenus | null>(null);
+  const [ivrMenusError, setIvrMenusError] = useState<string | null>(null);
+  const [ivrPreviewSteps, setIvrPreviewSteps] = useState<IvrPreviewStep[]>([]);
+  const [ivrMenusBusy, setIvrMenusBusy] = useState(false);
+  const [threadAuto, setThreadAuto] = useState<ThreadAutoReplyStatus | null>(null);
+  const [threadIvr, setThreadIvr] = useState<ThreadIvrStatus | null>(null);
+  const [productsReal, setProducts] = useState<Product[]>([]);
+  const [customersReal, setCustomers] = useState<Customer[]>([]);
+  const [catalogFormOpen, setCatalogFormOpen] = useState(false);
+  const [productForm, setProductForm] = useState({
+    id: "",
+    name: "",
+    description: "",
+    price: "",
+    cost: "",
+    supplier: "",
+    stock: "0",
+    sku: "",
+    baseUnit: "ea",
+    stockUnit: "",
+    salesUnit: "",
+    weight: "",
+    weightUnit: "g",
+    imagePath: "",
+    lowStockThreshold: "",
   });
+  const [sellPacks, setSellPacks] = useState<SellPackRow[]>([]);
+  const [orderSellOptionId, setOrderSellOptionId] = useState("");
+  const [productImageFile, setProductImageFile] = useState<File | null>(null);
+  const [productImagePreview, setProductImagePreview] = useState<string | null>(null);
+  const [clearProductImageFlag, setClearProductImageFlag] = useState(false);
+  const [imageDragOver, setImageDragOver] = useState(false);
+  const [newDmPhone, setNewDmPhone] = useState("");
+  const [contactForm, setContactForm] = useState({ phone: "", name: "" });
+  const [groupForm, setGroupForm] = useState({ name: "", members: "" });
+  const [ordersReal, setOrders] = useState<Order[]>([]);
+  const [orderProductId, setOrderProductId] = useState("");
+  const [orderQty, setOrderQty] = useState("1");
+  const [auditReal, setAudit] = useState<AutoReplyAuditEntry[]>([]);
+  const [salesSummaryReal, setSalesSummary] = useState<SalesSummary | null>(null);
+  const [commerceAuditReal, setCommerceAudit] = useState<CommerceAuditEvent[]>([]);
+  const [ivrAuditReal, setIvrAudit] = useState<SimpleAuditEntry[]>([]);
+  const [outboxAuditReal, setOutboxAudit] = useState<SimpleAuditEntry[]>([]);
+  const [salesRange, setSalesRange] = useState<"7" | "30" | "all">("30");
+  const [salesStatus, setSalesStatus] = useState("all");
+  const [peopleKey, setPeopleKey] = useState<string | null>(null);
+  const [catalogProductId, setCatalogProductId] = useState<string | null>(null);
+  const [catalogSearchQuery, setCatalogSearchQuery] = useState("");
+  const [catalogSearchTick, setCatalogSearchTick] = useState(0);
+  const [focusOrderId, setFocusOrderId] = useState<string | null>(null);
+  const [newDmError, setNewDmError] = useState<string | null>(null);
+  const [newDmOpen, setNewDmOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [productImagesReal, setProductImages] = useState<Record<string, string>>({});
+  const contextMenu = useContextMenu();
+  const [menuEditorOpen, setMenuEditorOpen] = useState(false);
+  const [editingMenu, setEditingMenu] = useState<string | null>(null);
 
-  // Backend event listeners - Real-time updates from Rust backend
-  useBackendEvents({
-    onMessageSent: (event) => {
-      log.info('Message sent successfully', event);
-      addLog(`✓ Message sent to ${event.recipient}`);
-    },
-    onOutboxSendFailed: (event) => {
-      log.warn('Message send failed', event);
-      if (event.retry_count >= event.max_retries) {
-        addLog(`✗ Message failed: ${event.error}`);
-      }
-    },
-    onOutboxMovedToDLQ: (event) => {
-      log.error('Message moved to DLQ', event);
-      addLog(`⚠ Message failed permanently: ${event.reason}`);
-    },
-    onThreadsUpdated: async (threads) => {
-      log.info('Threads updated from event', threads.length);
-      setThreads(threads);
-    },
-    onMessageReceived: async (message) => {
-      log.info('New message received', message);
-      await refreshThreads();
-      addLog('📨 New message received');
-    },
-  });
-
-  const [aliases, setAliases] = useState<AliasMap>({});
-  const [aliasNumber, setAliasNumber] = useState("");
-  const [aliasValue, setAliasValue] = useState("");
-  const [contactMeta, setContactMeta] = useState<Record<string, ContactMeta>>(
-    {}
-  );
-  const [categories, setCategories] = useState<string[]>([]);
-  const [groupMeta, setGroupMeta] = useState<Record<string, GroupMeta>>({});
-  const [groupCategories, setGroupCategories] = useState<string[]>([]);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-
-  // Feature flags
-  const [features, setFeatures] = useState<Record<string, boolean>>({});
-  const fe = (key: string, def: boolean) => (features[key] ?? def);
-
-  useEffect(() => {
-    if (!tauriAvailable) {
-      const devAccount = localStorage.getItem("signalx.dev.account");
-      if (devAccount) {
-        setAccounts([devAccount]);
-        setActiveAccount(devAccount);
-        addLog("Tauri unavailable; using dev account fallback");
-      } else {
-        setAccounts([]);
-        setActiveAccount(null);
-        addLog("Tauri unavailable; skipping backend boot");
-      }
-      return;
+  // Dev-only design data. Real state always wins; fixtures fill in only while a
+  // list is genuinely empty, and USE_FIXTURES is false in any release build.
+  const threads = USE_FIXTURES && !threadsReal.length ? fxThreads : threadsReal;
+  const messages = (() => {
+    const live = selectedId
+      ? messagesReal.filter(
+          (m) =>
+            m.thread_id === selectedId ||
+            m.thread_id.replace(/^dm:/, "") === selectedId.replace(/^dm:/, ""),
+        )
+      : messagesReal;
+    if (live.length) return live;
+    if (USE_FIXTURES && selectedId) {
+      return fxMessages.filter((m) => m.thread_id === selectedId);
     }
-    let unlisten: null | (() => void) = null;
-    (async () => {
-      try {
-        const res: any = await invoke("get_feature_flags");
-        const flags = (res?.ok?.flags ?? res?.flags ?? {}) as Record<string, boolean>;
-        setFeatures(flags);
-      } catch (err) {
-        console.warn('Failed to load feature flags:', err);
-      }
-      try {
-        const u = await listen<any>("features-updated", (e) => {
-          const flags = (e?.payload?.flags ?? {}) as Record<string, boolean>;
-          setFeatures(flags);
-        });
-        unlisten = u;
-      } catch (err) {
-        console.warn('Failed to set up feature flags listener:', err);
-      }
-    })();
-    return () => {
-      try { 
-        if (unlisten) unlisten(); 
-      } catch (err) {
-        console.warn('Failed to cleanup feature flags listener:', err);
-      }
-    };
-  }, []);
+    return [];
+  })();
+  const globalOutbox =
+    USE_FIXTURES && !globalOutboxReal.length ? fxOutbox : globalOutboxReal;
+  const searchHits = searchHitsReal.length
+    ? searchHitsReal
+    : USE_FIXTURES
+      ? fxSearchHits.filter((h) => {
+          const q = searchLiveQ.trim().toLowerCase();
+          if (!q) return false;
+          return `${h.snippet} ${h.thread_id} ${h.sender}`.toLowerCase().includes(q);
+        })
+      : [];
+  const contacts = USE_FIXTURES && !contactsReal.length ? fxContacts : contactsReal;
+  const groups = USE_FIXTURES && !groupsReal.length ? fxGroups : groupsReal;
+  const products = USE_FIXTURES && !productsReal.length ? fxProducts : productsReal;
+  const customers = USE_FIXTURES && !customersReal.length ? fxCustomers : customersReal;
+  const orders = USE_FIXTURES && !ordersReal.length ? fxOrders : ordersReal;
+  const audit = USE_FIXTURES && !auditReal.length ? fxAudit : auditReal;
+  const commerceAudit =
+    USE_FIXTURES && !commerceAuditReal.length ? fxCommerceAudit : commerceAuditReal;
+  const ivrAudit = USE_FIXTURES && !ivrAuditReal.length ? fxIvrAudit : ivrAuditReal;
+  const outboxAudit = USE_FIXTURES && !outboxAuditReal.length ? fxOutboxAudit : outboxAuditReal;
+  // The sales API answers with a valid but zeroed summary when no account is
+  // configured, so treat "no orders" as empty rather than only null.
+  const salesSummary =
+    USE_FIXTURES && !salesSummaryReal?.order_count ? fxSalesSummary : salesSummaryReal;
+  // Fixture products have no `image_path`, so the loader below never fetches
+  // for them. Merge rather than replace: a real uploaded photo always wins.
+  const productImages = USE_FIXTURES
+    ? { ...fxProductImages, ...productImagesReal }
+    : productImagesReal;
 
-  const [settingsContactId, setSettingsContactId] = useState<string | null>(null);
-  const [settingsGroupId, setSettingsGroupId] = useState<string | null>(null);
-  const [newMessageOpen, setNewMessageOpen] = useState(false);
-  const [newMessageNumber, setNewMessageNumber] = useState("");
-
-  // Contacts tab filters/sort
-  const [contactsSort, setContactsSort] = useState<"smart" | "name">("smart");
-  const [filterFavoritesOnly, setFilterFavoritesOnly] = useState(false);
-  const [filterUnreadOnly, setFilterUnreadOnly] = useState(false);
-  const [filterShowMuted, setFilterShowMuted] = useState(false);
-  const [filterCategory, setFilterCategory] = useState<string>("");
-  const [filterHasPhoto, setFilterHasPhoto] = useState(false);
-  const [filterHasAppleLink, setFilterHasAppleLink] = useState(false);
-
-  // Groups tab filters/sort (minimal, matches step 4 chips)
-  const [groupsSort, setGroupsSort] = useState<"smart" | "name">("smart");
-  const [groupFilterFavoritesOnly, setGroupFilterFavoritesOnly] = useState(false);
-  const [groupFilterUnreadOnly, setGroupFilterUnreadOnly] = useState(false);
-  const [groupFilterShowMuted, setGroupFilterShowMuted] = useState(false);
-  const [groupFilterCategory, setGroupFilterCategory] = useState<string>("");
-  const [contactPhotoUrls, setContactPhotoUrls] = useState<Record<string, string>>(
-    {}
-  );
-
-  const [searchQuery, setSearchQuery] = useState("");
-  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
-  const [searching, setSearching] = useState(false);
-  const searchResultsRef = useRef<HTMLDivElement | null>(null);
-
-  const [aiIntent, setAiIntent] = useState("polite");
-  const [aiConstraints, setAiConstraints] = useState("short, clear, no emojis");
-  const [aiOutput, setAiOutput] = useState<string>("");
-
-  const [exporting, setExporting] = useState(false);
-  const [exportMenuOpen, setExportMenuOpen] = useState(false);
-  const [exportResult, setExportResult] = useState<{
-    path: string;
-    format: string;
-    message_count: number;
-  } | null>(null);
-  const [pendingReplies, setPendingReplies] = useState<PendingReply[]>([]);
-  const [outboxItems, setOutboxItems] = useState<OutboxItem[]>([]);
-  const [outboxSummary, setOutboxSummary] = useState<OutboxSummary>({
-    queued: 0,
-    sending: 0,
-    failed: 0,
-  });
-  const [draftHistory, setDraftHistory] = useState<PendingReply[]>([]);
-  const [showWelcome, setShowWelcome] = useState(true);
-  const { isActive: isOnboardingActive, nextStep: onboardingNextStep } = useOnboarding();
-  const [searchSender, setSearchSender] = useState("");
-  const [searchAfter, setSearchAfter] = useState("");
-  const [searchBefore, setSearchBefore] = useState("");
-  const [sidebarWidth, setSidebarWidth] = useState(340);
-  const [dragging, setDragging] = useState<"sidebar" | "tools" | null>(null);
-  const [, setDiagnostics] = useState<Diagnostics | null>(null);
-  const [receiveState, setReceiveState] = useState<ReceiveLoopState | null>(
-    null
-  );
-  // Step 4: keep diagnostics hidden (reintroduced in Step 5 via Developer Mode)
-  const [toolsOpen, setToolsOpen] = useState(true);
-  const [toolsWidth, setToolsWidth] = useState(360);
-  const [aliasesOpen, setAliasesOpen] = useState(false);
-  const [navTab, setNavTab] = useState<"contacts" | "groups" | "threads">(
-    "contacts"
-  );
-  const [peopleQuery, setPeopleQuery] = useState("");
-  const [peopleQueryDebounced, setPeopleQueryDebounced] = useState("");
-
-  // Field filters (Contacts/Groups)
-  const [contactFieldKey, setContactFieldKey] = useState("");
-  const [contactFieldValue, setContactFieldValue] = useState("");
-  const [contactFieldOpen, setContactFieldOpen] = useState(false);
-  const [groupFieldKey, setGroupFieldKey] = useState("");
-  const [groupFieldValue, setGroupFieldValue] = useState("");
-  const [groupFieldOpen, setGroupFieldOpen] = useState(false);
-
-  const unlistenRefs = useRef<(() => void)[]>([]);
-
-  // Debounce people search (Contacts/Groups) to keep UI responsive.
-  useEffect(() => {
-    const id = window.setTimeout(() => {
-      setPeopleQueryDebounced(peopleQuery);
-    }, 200);
-    return () => window.clearTimeout(id);
-  }, [peopleQuery]);
-  const selectedThreadIdRef = useRef<string | null>(null);
-  const activeAccountRef = useRef<string | null>(null);
-
-  useEffect(() => {
-    selectedThreadIdRef.current = selectedThreadId;
-  }, [selectedThreadId]);
-
-  useEffect(() => {
-    activeAccountRef.current = activeAccount;
-  }, [activeAccount]);
-
-  const getThreadName = (t: ThreadSummary): string => {
-    const first = t.participants?.[0] || t.id;
-    return aliases[first] || aliases[t.id] || first || t.id;
-  };
-
-  const isGroupThread = (t: ThreadSummary): boolean => {
-    return t.id.startsWith("group:") || (t.participants || []).length > 2;
-  };
-
-  const toContactKey = (threadOrNumber: string): string => {
-    const s = (threadOrNumber || "").trim();
-    if (!s) return "";
-    if (s.startsWith("dm:") || s.startsWith("group:")) return s;
-    return `dm:${s}`;
-  };
-
-  const dmNumberFromKey = (contactKey: string): string => {
-    return contactKey.startsWith("dm:") ? contactKey.slice(3) : contactKey;
-  };
-
-  const contactIdFromThread = (t: ThreadSummary): string => {
-    // Prefer the non-self participant for 1:1 threads
-    const ps = t.participants || [];
-    const nonSelf = ps.find((p) =>
-      activeAccount ? p !== activeAccount : true
-    );
-    const num = nonSelf || t.id;
-    return toContactKey(num);
-  };
-
-  const contactsDerived = useMemo(() => {
-    const map = new Map<
-      string,
-      {
-        id: string; // phone number
-        alias?: string;
-        unread_count: number;
-        last_message_ts: number;
-        thread_id: string | null; // most recent 1:1 thread id
-      }
-    >();
-
-    for (const t of threads) {
-      if (isGroupThread(t)) continue;
-      const cid = contactIdFromThread(t);
-      const prev = map.get(cid);
-      const unread = (prev?.unread_count || 0) + (t.unread_count || 0);
-      const last =
-        prev?.last_message_ts && prev.last_message_ts > t.last_message_timestamp
-          ? prev.last_message_ts
-          : t.last_message_timestamp;
-      const threadId =
-        !prev?.thread_id || t.last_message_timestamp >= prev.last_message_ts
-          ? t.id
-          : prev.thread_id;
-      map.set(cid, {
-        id: cid,
-        alias: aliases[dmNumberFromKey(cid)],
-        unread_count: unread,
-        last_message_ts: last || 0,
-        thread_id: threadId,
-      });
-    }
-
-    const list = Array.from(map.values()).sort(
-      (a, b) => (b.last_message_ts || 0) - (a.last_message_ts || 0)
-    );
-    const q = peopleQuery.trim().toLowerCase();
-    if (!q) return list;
-    return list.filter((c) => {
-      const name = (c.alias || "").toLowerCase();
-      return c.id.toLowerCase().includes(q) || name.includes(q);
-    });
-  }, [threads, aliases, activeAccount, peopleQuery]);
-
-  const contactsMerged = useMemo(() => {
-    // union: thread-derived + meta-only contacts
-    const map = new Map<
-      string,
-      {
-        id: string;
-        alias?: string;
-        unread_count: number;
-        last_message_ts: number;
-        thread_id: string | null;
-        meta?: ContactMeta;
-      }
-    >();
-
-    for (const c of contactsDerived) {
-      map.set(c.id, { ...c, meta: contactMeta[c.id] });
-    }
-
-    for (const [cid, meta] of Object.entries(contactMeta)) {
-      if (!map.has(cid)) {
-        map.set(cid, {
-          id: cid,
-          alias: aliases[dmNumberFromKey(cid)],
-          unread_count: 0,
-          last_message_ts: 0,
-          thread_id: null,
-          meta,
-        });
-      } else {
-        const prev = map.get(cid)!;
-        map.set(cid, { ...prev, meta });
-      }
-    }
-
-    return Array.from(map.values());
-  }, [contactsDerived, contactMeta, aliases]);
-
-  const contactFieldKeys = useMemo(() => {
-    const set = new Set<string>();
-    for (const meta of Object.values(contactMeta || {})) {
-      for (const f of (meta?.custom_fields || []) as any[]) {
-        const k = String(f?.key || "").trim();
-        if (k) set.add(k);
-      }
-    }
-    return Array.from(set).sort((a, b) => a.localeCompare(b));
-  }, [contactMeta]);
-
-  const contactsForUi = useMemo(() => {
-    const q = peopleQueryDebounced.trim().toLowerCase();
-
-    const withDisplay = contactsMerged.map((c) => {
-      const meta = c.meta;
-      const display =
-        meta?.display_name ||
-        meta?.alias ||
-        aliases[dmNumberFromKey(c.id)] ||
-        c.alias ||
-        dmNumberFromKey(c.id);
-      return { ...c, display_name: display, meta: meta || null };
-    });
-
-    const matchesQuery = (c: any) => {
-      if (!q) return true;
-      const meta = c.meta as ContactMeta | null;
-      const searchableFields = (meta?.custom_fields || [])
-        .filter((f: any) => f.searchable ?? f.is_searchable)
-        .map((f) => `${f.key} ${f.value}`)
-        .join(" ");
-      const hay = [
-        c.display_name || "",
-        c.id || "",
-        meta?.display_name || "",
-        meta?.alias || "",
-        (meta?.categories || []).join(" "),
-        searchableFields,
-      ]
-        .join(" ")
-        .toLowerCase();
-      return hay.includes(q);
-    };
-
-    let out = withDisplay.filter(matchesQuery);
-
-    // Filters
-    out = out.filter((c: any) => {
-      const meta = c.meta as ContactMeta | null;
-      if (filterFavoritesOnly && !meta?.favorite) return false;
-      if (filterUnreadOnly && !(c.unread_count > 0)) return false;
-      if (!filterShowMuted && meta?.muted) return false;
-      if (filterCategory) {
-        const cats = meta?.categories || [];
-        if (!cats.includes(filterCategory)) return false;
-      }
-      if (filterHasPhoto && !meta?.photo_path) return false;
-      if (filterHasAppleLink && !meta?.apple_contact_id) return false;
-      if (contactFieldKey.trim() || contactFieldValue.trim()) {
-        const fk = contactFieldKey.trim().toLowerCase();
-        const fv = contactFieldValue.trim().toLowerCase();
-        const fields = (meta?.custom_fields || []) as any[];
-        const ok = fields.some((f) => {
-          const k = String(f?.key || "").toLowerCase();
-          const v = String(f?.value ?? "").toLowerCase();
-          if (fk && !k.includes(fk)) return false;
-          if (fv && !v.includes(fv)) return false;
-          return true;
-        });
-        if (!ok) return false;
-      }
-      return true;
-    });
-
-    // Sort
-    const byName = (a: any, b: any) =>
-      String(a.display_name || "").localeCompare(String(b.display_name || ""));
-    const byLast = (a: any, b: any) => (b.last_message_ts || 0) - (a.last_message_ts || 0);
-    const byUnread = (a: any, b: any) => (b.unread_count || 0) - (a.unread_count || 0);
-    const byFav = (a: any, b: any) => {
-      const af = a.meta?.favorite ? 1 : 0;
-      const bf = b.meta?.favorite ? 1 : 0;
-      return bf - af;
-    };
-
-    // Always float favorites to the top, even in name sort
-    if (contactsSort === "name") out.sort((a, b) => byFav(a, b) || byName(a, b));
-    else out.sort((a, b) => (byFav(a, b) || byUnread(a, b) || byLast(a, b)));
-
-    return out;
-  }, [
-    contactsMerged,
-    aliases,
-    peopleQueryDebounced,
-    contactsSort,
-    filterFavoritesOnly,
-    filterUnreadOnly,
-    filterShowMuted,
-    filterCategory,
-    filterHasPhoto,
-    filterHasAppleLink,
-    contactFieldKey,
-    contactFieldValue,
-  ]);
-
-  const groupFieldKeys = useMemo(() => {
-    const set = new Set<string>();
-    for (const meta of Object.values(groupMeta || {})) {
-      for (const f of (meta?.custom_fields || []) as any[]) {
-        const k = String(f?.key || "").trim();
-        if (k) set.add(k);
-      }
-    }
-    return Array.from(set).sort((a, b) => a.localeCompare(b));
-  }, [groupMeta]);
-
-  const groupsDerived = useMemo(() => {
-    const list = threads
-      .filter((t) => isGroupThread(t))
-      .map((t) => {
-        const meta = groupMeta[t.id];
-        const name = meta?.display_name || aliases[t.id] || "Group chat";
-        const icon = meta?.icon || null;
-        const members = (t.participants || []).length;
-        return {
-          id: t.id,
-          name,
-          icon,
-          members,
-          unread_count: t.unread_count || 0,
-          last_message_ts: t.last_message_timestamp || 0,
-          meta: meta || null,
-        };
-      })
-      .filter((g) => {
-        if (groupFilterFavoritesOnly && !g.meta?.favorite) return false;
-        if (groupFilterUnreadOnly && !(g.unread_count > 0)) return false;
-        if (!groupFilterShowMuted && g.meta?.muted) return false;
-        if (groupFilterCategory) {
-          const cats = g.meta?.categories || [];
-          if (!cats.includes(groupFilterCategory)) return false;
-        }
-        if (groupFieldKey.trim() || groupFieldValue.trim()) {
-          const fk = groupFieldKey.trim().toLowerCase();
-          const fv = groupFieldValue.trim().toLowerCase();
-          const fields = (g.meta?.custom_fields || []) as any[];
-          const ok = fields.some((f) => {
-            const k = String(f?.key || "").toLowerCase();
-            const v = String(f?.value ?? "").toLowerCase();
-            if (fk && !k.includes(fk)) return false;
-            if (fv && !v.includes(fv)) return false;
-            return true;
-          });
-          if (!ok) return false;
-        }
-        return true;
-      })
-      .sort((a, b) => {
-        const byName = String(a.name || "").localeCompare(String(b.name || ""));
-        const byLast = (b.last_message_ts || 0) - (a.last_message_ts || 0);
-        const byUnread = (b.unread_count || 0) - (a.unread_count || 0);
-        const byFav = (b.meta?.favorite ? 1 : 0) - (a.meta?.favorite ? 1 : 0);
-        // Always float favorites to the top, even in name sort
-        if (groupsSort === "name") return byFav || byName;
-        return byFav || byUnread || byLast;
-      });
-
-    const q = peopleQueryDebounced.trim().toLowerCase();
-    if (!q) return list;
-    return list.filter((g) => {
-      const meta = g.meta as any | null;
-      const searchableFields = ((meta?.custom_fields || []) as any[])
-        .filter((f) => f.searchable ?? f.is_searchable)
-        .map((f) => `${f.key} ${f.value}`)
-        .join(" ");
-      const hay = [
-        g.name,
-        g.id,
-        meta?.display_name || "",
-        (meta?.categories || []).join(" "),
-        searchableFields,
-      ]
-        .join(" ")
-        .toLowerCase();
-      return hay.includes(q);
-    });
-  }, [
-    threads,
-    aliases,
-    peopleQueryDebounced,
-    groupMeta,
-    groupsSort,
-    groupFilterFavoritesOnly,
-    groupFilterUnreadOnly,
-    groupFilterShowMuted,
-    groupFilterCategory,
-    groupFieldKey,
-    groupFieldValue,
-  ]);
-
-  const refreshDiagnostics = async () => {
-    try {
-      const d = await unwrap<Diagnostics>(
-        invoke("get_diagnostics"),
-        "get_diagnostics"
-      );
-      setDiagnostics(d);
-    } catch (e: any) {
-      addLog(String(e?.message || e));
-    }
-  };
-
-  const refreshReceiveLoopState = async () => {
-    try {
-      const s = await unwrap<ReceiveLoopState>(
-        invoke("get_receive_loop_state"),
-        "get_receive_loop_state"
-      );
-      setReceiveState(s);
-    } catch (e: any) {
-      addLog(String(e?.message || e));
-    }
-  };
+  const [linkBusy, setLinkBusy] = useState(false);
+  const [linkUri, setLinkUri] = useState<string | null>(null);
+  const [linkStatus, setLinkStatus] = useState<DeviceLinkStatus | null>(null);
+  const [linkCopied, setLinkCopied] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("account");
+  const [importMode, setImportMode] = useState<"replace" | "merge">("replace");
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupPassword, setBackupPassword] = useState("");
+  const [restartRequired, setRestartRequired] = useState(false);
+  const [threadFilter, setThreadFilter] = useState<ThreadFilter>(EMPTY_THREAD_FILTER);
+  const [orderFilter, setOrderFilter] = useState<OrderFilterState>(EMPTY_ORDER_FILTER);
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const selectedRef = useRef<string | null>(null);
+  selectedRef.current = selectedId;
 
   const refreshThreads = async () => {
-    try {
-      const t = await unwrap<ThreadSummary[]>(
-        invoke("get_threads"),
-        "get_threads"
+    const res = await api.getThreads();
+    if (res.success) setThreads(res.data);
+  };
+
+  const refreshDiagnostics = async () => {
+    const res = await api.getDiagnostics();
+    if (res.success) setDiagnostics(res.data);
+  };
+
+  const refreshMessages = async (threadId: string) => {
+    const [msgs, box] = await Promise.all([
+      api.getThreadMessages(threadId),
+      api.listOutbox(threadId),
+    ]);
+    if (msgs.success) {
+      setMessages(msgs.data.filter((m) => !isEnvelopeNoiseContent(m.content)));
+      const c = await api.listContactMeta();
+      if (c.success) setContacts(c.data);
+    }
+    if (box.success) setOutbox(box.data.filter((i) => i.state !== "sent"));
+    const marked = await api.markThreadRead(threadId);
+    if (marked.success) {
+      setThreads((prev) =>
+        prev.map((t) => (t.id === threadId ? { ...t, unread_count: 0 } : t)),
       );
-      setThreads(t);
-    } catch (e: any) {
-      addLog(String(e?.message || e));
+      void refreshThreads();
     }
   };
 
-  const refreshAliases = async () => {
-    try {
-      const a = await unwrap<AliasMap>(invoke("list_aliases"), "list_aliases");
-      setAliases(a || {});
-    } catch (e: any) {
-      addLog(String(e?.message || e));
+  const refreshMeta = async () => {
+    const [c, g, ar, au, ivr, prods, custs, ords] = await Promise.all([
+      api.listContactMeta(),
+      api.listGroupMeta(),
+      api.getAutoReplySettings(),
+      api.listAutoReplyAudit(80),
+      api.getIvrSettings(),
+      api.listProducts(),
+      api.listCustomers(),
+      api.listOrders(),
+    ]);
+    if (c.success) setContacts(c.data);
+    if (g.success) setGroups(g.data);
+    if (ar.success) setAutoSettings(ar.data);
+    if (au.success) setAudit(au.data);
+    if (ivr.success) setIvrSettings(ivr.data);
+    if (prods.success) {
+      setProducts(prods.data);
+      if (!orderProductId && prods.data[0]) setOrderProductId(prods.data[0].id);
+    }
+    if (custs.success) setCustomers(custs.data);
+    if (ords.success) setOrders(ords.data);
+  };
+
+  const applySession = (s: SessionStatus) => {
+    setSession(s);
+    setAccountNumber(s.locked ? null : (s.number ?? null));
+    if (s.locked) {
+      setSelectedId(null);
+      setThreads([]);
+      setMessages([]);
+      setProducts([]);
+      setOrders([]);
+      setCustomers([]);
+      setIvrMenusDraft(null);
+    }
+    if (!unlockId && s.accounts[0]) setUnlockId(s.accounts[0].id);
+  };
+
+  const refreshSession = async () => {
+    const res = await api.sessionStatus();
+    if (res.success) applySession(res.data);
+  };
+
+  const bootstrap = async () => {
+    const [diag, recv, aiStatus, sess] = await Promise.all([
+      api.getDiagnostics(),
+      api.getReceiveLoopState(),
+      api.checkAiStatus(),
+      api.sessionStatus(),
+    ]);
+    const d = unwrap(diag, null as unknown as Diagnostics | null);
+    setDiagnostics(d);
+    if (sess.success) applySession(sess.data);
+    else setAccountNumber(d?.number ?? null);
+    if (sess.success && sess.data.locked) {
+      setStatus("Unlock an account to send and receive");
+    }
+    setHealth(unwrap(recv, null as unknown as ReceiveLoopState));
+    setAi(unwrap(aiStatus, null as unknown as AiStatus));
+    if (!(sess.success && sess.data.locked)) {
+      await refreshThreads();
+      await refreshMeta();
+      await refreshGlobalOutbox();
     }
   };
 
-  const refreshContactMeta = async () => {
-    try {
-      const list = await unwrap<ContactMeta[]>(
-        invoke("list_contact_meta"),
-        "list_contact_meta"
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    if (!canInvoke()) {
+      setAutoSettings({
+        enabled: false,
+        allowlist: [],
+        quiet_hours_start: null,
+        quiet_hours_end: null,
+        max_per_thread_per_hour: 4,
+        max_per_window: 20,
+        window_secs: 3600,
+      });
+      setIvrSettings({
+        enabled: false,
+        allowlist: [],
+        require_allowlist: false,
+        hide_zero_stock: false,
+      });
+      return;
+    }
+    void bootstrap();
+    const unsubs: Array<() => void> = [];
+    void (async () => {
+      unsubs.push(
+        await onEvent<{ thread_id?: string }>("message://new", (p) => {
+          void refreshThreads();
+          const cur = selectedRef.current;
+          if (p.thread_id && p.thread_id === cur) void refreshMessages(p.thread_id);
+        }),
       );
-      const map: Record<string, ContactMeta> = {};
-      for (const c of list || []) {
-        map[c.contact_id] = c;
+      unsubs.push(
+        await onEvent("outbox://updated", () => {
+          void refreshThreads();
+          void refreshGlobalOutbox();
+          const cur = selectedRef.current;
+          if (cur) void refreshMessages(cur);
+        }),
+      );
+      unsubs.push(
+        await onEvent("outbox://item-updated", () => {
+          void refreshGlobalOutbox();
+          const cur = selectedRef.current;
+          if (cur) void refreshMessages(cur);
+        }),
+      );
+      unsubs.push(
+        await onEvent<ReceiveLoopState>("receive://health", (s) => setHealth(s)),
+      );
+      unsubs.push(
+        await onEvent<{ pending?: { draft: string; thread_id: string } }>("agent://draft", (p) => {
+          if (p.pending && p.pending.thread_id === selectedRef.current) {
+            setComposer((c) => c || p.pending!.draft);
+            setStatus("AI draft ready — review before sending");
+          }
+        }),
+      );
+      unsubs.push(
+        await onEvent("auto-reply://audit", () => {
+          void api.listAutoReplyAudit(80).then((r) => {
+            if (r.success) setAudit(r.data);
+          });
+        }),
+      );
+      unsubs.push(
+        await onEvent<AutoReplySettings>("auto-reply://settings", (s) => setAutoSettings(s)),
+      );
+      unsubs.push(
+        await onEvent<IvrSettings>("ivr://settings", (s) => setIvrSettings(s)),
+      );
+      unsubs.push(
+        await onEvent<{ thread_id?: string; handed_off?: boolean; node_id?: string }>(
+          "ivr://session",
+          (p) => {
+            if (p.thread_id && p.thread_id === selectedRef.current) {
+              void api.getThreadIvr(p.thread_id).then((r) => {
+                if (r.success) setThreadIvr(r.data);
+              });
+            }
+          },
+        ),
+      );
+      unsubs.push(
+        await onEvent<DeviceLinkUri>("device-link://uri", (p) => {
+          if (p.uri) setLinkUri(p.uri);
+        }),
+      );
+      unsubs.push(
+        await onEvent<DeviceLinkStatus>("device-link://status", (s) => {
+          setLinkStatus(s);
+          setLinkBusy(false);
+          if (s.state === "success") {
+            setStatus("Device linked — add the new number to the roster with a PIN");
+            void refreshDiagnostics();
+            void refreshSession();
+          }
+        }),
+      );
+      unsubs.push(
+        await onEvent("account://switched", () => {
+          setSelectedId(null);
+          setAccountMenuOpen(false);
+          void bootstrap();
+        }),
+      );
+    })();
+    const poll = window.setInterval(() => {
+      void api.getReceiveLoopState().then((r) => {
+        if (r.success) setHealth(r.data);
+      });
+      void api.checkAiStatus().then((r) => {
+        if (r.success) setAi(r.data);
+      });
+    }, 15000);
+    return () => {
+      unsubs.forEach((u) => u());
+      window.clearInterval(poll);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!selectedId) {
+      setMessages([]);
+      setOutbox([]);
+      setThreadAuto(null);
+      setThreadIvr(null);
+      setSummaryText(null);
+      return;
+    }
+    void refreshMessages(selectedId);
+    void api.getThreadAutoReply(selectedId).then((r) => {
+      if (r.success) setThreadAuto(r.data);
+    });
+    void api.getThreadIvr(selectedId).then((r) => {
+      if (r.success) setThreadIvr(r.data);
+    });
+  }, [selectedId]);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, outbox]);
+
+  const focusSearch = useCallback(() => {
+    setShortcutsOpen(false);
+    setSearchOpen(true);
+    requestAnimationFrame(() => {
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+    });
+  }, []);
+  const goShortcutPanel = useCallback(
+    (id: "threads" | "people" | "catalog" | "orders" | "sales" | "settings") => {
+      setShortcutsOpen(false);
+      setPanel(id);
+    },
+    [],
+  );
+  const toggleShortcutsHelp = useCallback(() => {
+    setShortcutsOpen((v) => !v);
+  }, []);
+  useGlobalShortcuts({
+    onSearch: focusSearch,
+    onNav: goShortcutPanel,
+    onToggleHelp: toggleShortcutsHelp,
+  });
+  useEscapeLayer(accountMenuOpen, () => setAccountMenuOpen(false));
+  useEscapeLayer(newDmOpen, () => {
+    setNewDmOpen(false);
+    setNewDmError(null);
+  });
+  useEscapeLayer(catalogFormOpen, () => {
+    setProductForm(emptyProductForm());
+    setSellPacks([]);
+    setProductImageFile(null);
+    setProductImagePreview(null);
+    setClearProductImageFlag(false);
+    setCatalogFormOpen(false);
+  });
+
+  const onSend = async () => {
+    if (!selectedId || sending || restartRequired) return;
+    const text = composer.trim();
+    if (!text && !attachFile) return;
+    setSending(true);
+    let res;
+    if (attachFile) {
+      try {
+        const { b64, ext } = await fileToBase64(attachFile);
+        res = await api.queueMessageWithAttachment(selectedId, text, b64, ext);
+      } catch (e) {
+        setSending(false);
+        setStatus(`Attachment failed: ${String(e)}`);
+        return;
       }
-      setContactMeta(map);
-    } catch (e: any) {
-      addLog(String(e?.message || e));
-      setContactMeta({});
+    } else {
+      res = await api.queueMessage(selectedId, text);
     }
+    setSending(false);
+    if (!res.success) {
+      setStatus(res.error);
+      return;
+    }
+    setComposer("");
+    setAttachFile(null);
+    if (attachPreview) URL.revokeObjectURL(attachPreview);
+    setAttachPreview(null);
+    setStatus(null);
+    await refreshMessages(selectedId);
+    await refreshThreads();
+    await refreshGlobalOutbox();
   };
 
-  const refreshCategories = async () => {
-    try {
-      const cats = await unwrap<string[]>(
-        invoke("list_categories"),
-        "list_categories"
+  const onRetry = async (id: string) => {
+    const res = await api.retryOutbox(id);
+    if (!res.success) setStatus(res.error);
+    if (selectedId) await refreshMessages(selectedId);
+  };
+
+  const onDeleteOutbox = async (id: string) => {
+    await api.deleteOutbox(id);
+    if (selectedId) await refreshMessages(selectedId);
+  };
+
+  const onSearch = async () => {
+    if (!searchQ.trim()) {
+      setSearchHits([]);
+      return;
+    }
+    const res = await api.searchMessages(searchQ.trim());
+    if (res.success) setSearchHits(res.data);
+    else setStatus(res.error);
+  };
+
+  useEffect(() => {
+    const q = searchQ.trim();
+    if (!q) {
+      setSearchLiveQ("");
+      setSearchHits([]);
+      return;
+    }
+    let cancelled = false;
+    const t = window.setTimeout(() => {
+      setSearchLiveQ(q);
+      void api.searchMessages(q).then((res) => {
+        if (cancelled || !res.success) return;
+        setSearchHits(res.data);
+      });
+    }, 300);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(t);
+    };
+  }, [searchQ]);
+
+  const onSummarize = async (): Promise<string | null> => {
+    if (!selectedId) return null;
+    setAiBusy(true);
+    setSummaryText(null);
+    const res = await api.summarizeThread(selectedId);
+    setAiBusy(false);
+    if (res.success) {
+      setSummaryText(res.data);
+      return res.data;
+    }
+    setStatus(res.error);
+    return null;
+  };
+
+  const onDraft = async (intent?: string) => {
+    if (!selectedId) return;
+    setAiBusy(true);
+    const res = await api.draftReply(
+      selectedId,
+      intent?.trim() || "helpful concise reply",
+      "do not auto-send",
+    );
+    setAiBusy(false);
+    if (res.success) {
+      setComposer(res.data);
+      setStatus("Draft filled into composer — review before send");
+    } else setStatus(res.error);
+  };
+
+  const onExportThread = async () => {
+    if (!selectedId) return;
+    const res = await api.exportThread(selectedId, "json");
+    if (!res.success) {
+      setStatus(res.error);
+      return;
+    }
+    const path =
+      res.data && typeof res.data === "object" && "path" in res.data
+        ? String((res.data as { path: string }).path)
+        : null;
+    if (path) {
+      await api.openPath(path);
+      setStatus(`Exported to ${path}`);
+    } else setStatus("Export complete");
+  };
+
+  const toggleThreadAuto = async (enabled: boolean) => {
+    if (!selectedId) return;
+    if (isGroupThread(selectedId) && enabled) {
+      const ok = window.confirm(
+        "Enable auto-reply for this group? Groups are off by default.",
       );
-      setCategories(cats || []);
-    } catch (e: any) {
-      addLog(String(e?.message || e));
-      setCategories([]);
+      if (!ok) return;
+    }
+    const res = await api.setThreadAutoReply(selectedId, enabled);
+    if (!res.success) {
+      setStatus(res.error);
+      return;
+    }
+    const st = await api.getThreadAutoReply(selectedId);
+    if (st.success) setThreadAuto(st.data);
+    await refreshMeta();
+  };
+
+  const saveAutoSettings = async (patch: Partial<AutoReplySettings>) => {
+    if (!autoSettings) return;
+    const next = { ...autoSettings, ...patch };
+    const res = await api.setAutoReplySettings(next);
+    if (res.success) setAutoSettings(res.data);
+    else setStatus(res.error);
+  };
+
+  const saveIvrSettings = async (patch: Partial<IvrSettings>) => {
+    if (!ivrSettings) return;
+    const next: IvrSettings = {
+      ...ivrSettings,
+      hide_zero_stock: ivrSettings.hide_zero_stock ?? false,
+      ...patch,
+    };
+    const res = await api.setIvrSettings(next);
+    if (res.success) {
+      setIvrSettings(res.data);
+      if (selectedId) {
+        const st = await api.getThreadIvr(selectedId);
+        if (st.success) setThreadIvr(st.data);
+      }
+    } else {
+      setStatus(res.error);
     }
   };
 
-  const refreshGroupMeta = async () => {
-    try {
-      const list = await unwrap<GroupMeta[]>(
-        invoke("list_group_meta"),
-        "list_group_meta"
-      );
-      const map: Record<string, GroupMeta> = {};
-      for (const g of list || []) {
-        map[g.group_id] = g;
-      }
-      setGroupMeta(map);
-    } catch (e: any) {
-      addLog(String(e?.message || e));
-      setGroupMeta({});
+  const addToAllowlist = async (kind: "ivr" | "auto", threadId: string | null) => {
+    if (!threadId || isGroupThread(threadId)) {
+      setStatus("Select a DM thread first");
+      return;
     }
-  };
-
-  const refreshGroupCategories = async () => {
-    try {
-      const cats = await unwrap<string[]>(
-        invoke("list_group_categories"),
-        "list_group_categories"
-      );
-      setGroupCategories(cats || []);
-    } catch (e: any) {
-      addLog(String(e?.message || e));
-      setGroupCategories([]);
+    if (kind === "ivr") {
+      if (!ivrSettings) return;
+      if (ivrSettings.allowlist.includes(threadId)) {
+        setStatus("This chat is already approved for the buyer menu");
+        return;
+      }
+      await saveIvrSettings({ allowlist: [...ivrSettings.allowlist, threadId] });
+      setStatus(`Buyer menu approved for ${threadTitle(threadId, contacts, groups, customers)}`);
+      return;
     }
+    if (!autoSettings) return;
+    if (autoSettings.allowlist.includes(threadId)) {
+      setStatus("Already on auto-reply allowlist");
+      return;
+    }
+    await saveAutoSettings({ allowlist: [...autoSettings.allowlist, threadId] });
+    setStatus(`Added to auto-reply allowlist: ${threadTitle(threadId, contacts, groups, customers)}`);
   };
 
-  const upsertContactMeta = async (contactId: string, patch: ContactMetaPatch) => {
-    await unwrap<ContactMeta>(
-      invoke("set_contact_meta", { contactId, patch }),
-      "set_contact_meta"
-    );
-    await refreshContactMeta();
-    await refreshCategories();
-  };
-
-  const deleteContactMeta = async (contactId: string) => {
-    await unwrap<boolean>(
-      invoke("delete_contact_meta", { contactId }),
-      "delete_contact_meta"
-    );
-    await refreshContactMeta();
-    await refreshCategories();
-  };
-
-  const uploadContactPhoto = async (contactId: string, bytes: number[], ext: string) => {
-    await unwrap<ContactMeta>(
-      invoke("set_contact_photo", { contactId, bytes, ext }),
-      "set_contact_photo"
-    );
-    await refreshContactMeta();
-  };
-
-  const removeContactPhoto = async (contactId: string) => {
-    await unwrap<ContactMeta>(
-      invoke("clear_contact_photo", { contactId }),
-      "clear_contact_photo"
-    );
-    await refreshContactMeta();
-  };
-
-  const linkAppleStub = async (contactId: string, appleContactId: string) => {
-    await unwrap<ContactMeta>(
-      invoke("link_apple_contact_stub", { contactId, appleContactId }),
-      "link_apple_contact_stub"
-    );
-    await refreshContactMeta();
-  };
-
-  const unlinkAppleStub = async (contactId: string) => {
-    await unwrap<ContactMeta>(
-      invoke("unlink_apple_contact_stub", { contactId }),
-      "unlink_apple_contact_stub"
-    );
-    await refreshContactMeta();
-  };
-
-  const setContactMuted = async (contactId: string, muted: boolean) => {
-    await upsertContactMeta(contactId, { muted });
-  };
-
-  const createContact = async (contactId: string) => {
-    await upsertContactMeta(contactId, {});
-  };
-
-  const setPhotoUrlFor = (contactId: string, url: string | null) => {
-    setContactPhotoUrls((prev) => {
-      const next = { ...prev };
-      const old = next[contactId];
-      if (old && old !== url) {
-        try {
-          URL.revokeObjectURL(old);
-        } catch {}
-      }
-      if (!url) {
-        delete next[contactId];
-      } else {
-        next[contactId] = url;
-      }
-      return next;
+  const removeFromAllowlist = async (kind: "ivr" | "auto", threadId: string) => {
+    if (kind === "ivr") {
+      if (!ivrSettings) return;
+      await saveIvrSettings({
+        allowlist: ivrSettings.allowlist.filter((t) => t !== threadId),
+      });
+      return;
+    }
+    if (!autoSettings) return;
+    await saveAutoSettings({
+      allowlist: autoSettings.allowlist.filter((t) => t !== threadId),
     });
   };
 
-  const ensureContactPhotoCached = async (contactId: string) => {
+  const startDeviceLink = async () => {
+    setLinkCopied(false);
+    setLinkUri(null);
+    setLinkStatus(null);
+    setLinkBusy(true);
+    const res = await api.startDeviceLink();
+    if (!res.success) {
+      setLinkBusy(false);
+      setLinkStatus({ state: "error", message: res.error });
+      setStatus(res.error);
+      return;
+    }
+    setLinkStatus({ state: "waiting", message: "Waiting for phone scan…" });
+  };
+
+  const cancelDeviceLink = async () => {
+    const res = await api.cancelDeviceLink();
+    if (!res.success) {
+      setStatus(res.error);
+      setLinkBusy(false);
+    }
+  };
+
+  const copyLinkUri = async () => {
+    if (!linkUri) return;
     try {
-      const res = await unwrap<{ bytes_base64: string; mime: string } | null>(
-        invoke("read_contact_photo", { contactId }),
-        "read_contact_photo"
-      );
-      if (!res) {
-        setPhotoUrlFor(contactId, null);
+      await navigator.clipboard.writeText(linkUri);
+      setLinkCopied(true);
+      window.setTimeout(() => setLinkCopied(false), 2000);
+    } catch {
+      setStatus("Could not copy URI — select and copy manually");
+    }
+  };
+
+  const orderParty = (o: Order): string => {
+    const cust = customers.find((c) => c.id === o.customer_id || c.thread_id === o.thread_id);
+    if (cust?.display_name) return cust.display_name;
+    return threadTitle(o.thread_id, contacts, groups, customers);
+  };
+
+  const toggleThreadIvr = async (enabled: boolean) => {
+    if (!selectedId) return;
+    if (isGroupThread(selectedId)) {
+      setStatus("Buyer menus only work in 1:1 chats, not groups");
+      return;
+    }
+    const res = await api.setThreadIvr(selectedId, enabled);
+    if (!res.success) {
+      setStatus(res.error);
+      return;
+    }
+    setThreadIvr(res.data);
+    setStatus(enabled ? "Buyer menu on for this chat" : "Buyer menu off for this chat");
+    await refreshMeta();
+  };
+
+  const resumeIvrBot = async () => {
+    if (!selectedId) return;
+    const res = await api.clearThreadHandoff(selectedId);
+    if (!res.success) {
+      setStatus(res.error);
+      return;
+    }
+    setThreadIvr(res.data);
+    setStatus("Bot resumed on this chat");
+  };
+
+  const emptyProductForm = () => ({
+    id: "",
+    name: "",
+    description: "",
+    price: "",
+    cost: "",
+    supplier: "",
+    stock: "0",
+    sku: "",
+    baseUnit: "ea",
+    stockUnit: "",
+    salesUnit: "",
+    weight: "",
+    weightUnit: "g",
+    imagePath: "",
+    lowStockThreshold: "",
+  });
+
+  const resetProductForm = () => {
+    setProductForm(emptyProductForm());
+    setSellPacks([]);
+    setProductImageFile(null);
+    setProductImagePreview(null);
+    setClearProductImageFlag(false);
+    setCatalogFormOpen(false);
+  };
+
+  const applyProductImageFile = (file: File | null) => {
+    setProductImageFile(file);
+    setClearProductImageFlag(false);
+    if (file) {
+      const url = URL.createObjectURL(file);
+      setProductImagePreview(url);
+    }
+  };
+
+    const packsFromProduct = (p: Product): SellPackRow[] =>
+    (p.sell_options || []).map((o) => ({
+      key: o.id || newPackRow().key,
+      id: o.id,
+      label: o.label,
+      amount: String(o.amount),
+      unit: o.unit || p.base_unit || "ea",
+      price:
+        o.price_cents != null && o.price_cents !== undefined
+          ? (o.price_cents / 100).toFixed(2)
+          : "",
+    }));
+
+  const sellOptionsFromPacks = (): Product["sell_options"] => {
+    const out: Product["sell_options"] = [];
+    for (const row of sellPacks) {
+      const label = row.label.trim();
+      if (!label && !row.amount.trim() && !row.price.trim()) continue;
+      if (!label) throw new Error("Each sell pack needs a label");
+      const amount = Number(row.amount);
+      if (!Number.isFinite(amount) || amount <= 0) {
+        throw new Error(`Pack “${label}” needs a quantity > 0`);
+      }
+      let price_cents: number | null = null;
+      if (row.price.trim()) {
+        const dollars = Number(row.price);
+        if (!Number.isFinite(dollars) || dollars < 0) {
+          throw new Error(`Pack “${label}” has a bad custom price`);
+        }
+        price_cents = Math.round(dollars * 100);
+      }
+      out.push({
+        id: row.id || "",
+        label,
+        amount,
+        unit: row.unit || productForm.baseUnit || "ea",
+        price_cents,
+      });
+    }
+    return out;
+  };
+
+  const saveProduct = async () => {
+    const name = productForm.name.trim();
+    if (!name) {
+      setStatus("Product name required");
+      return;
+    }
+    const priceCents = Math.round(Number(productForm.price || "0") * 100);
+    const costCents = Math.round(Number(productForm.cost || "0") * 100);
+    const stock = Number(productForm.stock || "0");
+    if (!Number.isFinite(stock) || stock < 0) {
+      setStatus("Stock must be a number ≥ 0");
+      return;
+    }
+    const weightRaw = productForm.weight.trim();
+    const weight = weightRaw === "" ? 0 : Number(weightRaw);
+    if (!Number.isFinite(weight) || weight < 0) {
+      setStatus("Weight must be a number ≥ 0");
+      return;
+    }
+    let sell_options: Product["sell_options"] = [];
+    try {
+      sell_options = sellOptionsFromPacks();
+    } catch (e) {
+      setStatus(String(e));
+      return;
+    }
+    const thrRaw = productForm.lowStockThreshold.trim();
+    let low_stock_threshold_milli = 0;
+    if (thrRaw !== "") {
+      const thrUnits = Number(thrRaw);
+      if (!Number.isFinite(thrUnits) || thrUnits < 0) {
+        setStatus("Low-stock threshold must be a number ≥ 0 (in base units)");
         return;
       }
-      const binStr = atob(res.bytes_base64 || "");
-      const bytes = new Uint8Array(binStr.length);
-      for (let i = 0; i < binStr.length; i++) bytes[i] = binStr.charCodeAt(i);
-      const blob = new Blob([bytes], { type: res.mime || "application/octet-stream" });
-      const url = URL.createObjectURL(blob);
-      setPhotoUrlFor(contactId, url);
-    } catch {
-      // ignore; keep avatar fallback
-      setPhotoUrlFor(contactId, null);
+      low_stock_threshold_milli = Math.round(thrUnits * 1000);
     }
-  };
-
-  useEffect(() => {
-    // cache photos for currently visible contacts (lightweight heuristic)
-    const ids = contactsForUi
-      .map((c: any) => c.id)
-      .filter((id: string) => {
-        const meta = contactMeta[id];
-        return !!meta?.photo_path;
-      })
-      .slice(0, 80);
-    for (const id of ids) {
-      if (!contactPhotoUrls[id]) {
-        ensureContactPhotoCached(id);
-      }
+    const res = await api.upsertProduct({
+      id: productForm.id,
+      name,
+      description: productForm.description.trim(),
+      sku: productForm.sku.trim(),
+      price_cents: Number.isFinite(priceCents) ? priceCents : 0,
+      cost_cents: Number.isFinite(costCents) ? costCents : 0,
+      supplier: productForm.supplier.trim(),
+      base_unit: productForm.baseUnit || "ea",
+      stock_unit: productForm.stockUnit.trim(),
+      sales_unit: productForm.salesUnit.trim(),
+      quantity_base_milli: 0,
+      quantity_in_stock: 0,
+      stock_qty: stock,
+      unit: productForm.baseUnit || "ea",
+      weight,
+      weight_unit: weight > 0 ? productForm.weightUnit || "g" : "",
+      image_path: "",
+      sell_options,
+      low_stock_threshold_milli,
+      updated_at: 0,
+    });
+    if (!res.success) {
+      setStatus(res.error);
+      return;
     }
-    // cleanup removed contacts
-    for (const id of Object.keys(contactPhotoUrls)) {
-      if (!contactMeta[id]?.photo_path) {
-        setPhotoUrlFor(id, null);
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [contactsForUi, contactMeta]);
-
-  const refreshPendingReplies = async (threadId: string) => {
-    try {
-      const replies = await unwrap<PendingReply[]>(
-        invoke("get_pending_replies", { threadId }),
-        "get_pending_replies"
-      );
-      setPendingReplies(replies || []);
-    } catch (e: any) {
-      addLog(String(e?.message || e));
-      setPendingReplies([]);
-    }
-  };
-
-  const refreshDraftHistory = async (threadId: string) => {
-    try {
-      const hist = await unwrap<PendingReply[]>(
-        invoke("get_draft_history", { threadId }),
-        "get_draft_history"
-      );
-      setDraftHistory(hist || []);
-    } catch (e: any) {
-      addLog(String(e?.message || e));
-      setDraftHistory([]);
-    }
-  };
-
-  const refreshOutbox = async (threadId: string) => {
-    try {
-      const items = await unwrap<OutboxItem[]>(
-        invoke("list_outbox", { threadId }),
-        "list_outbox"
-      );
-      setOutboxItems(items || []);
-    } catch (e: any) {
-      addLog(String(e?.message || e));
-      setOutboxItems([]);
-    }
-  };
-
-  const refreshOutboxSummary = async () => {
-    try {
-      const s = await unwrap<OutboxSummary>(
-        invoke("get_outbox_state_summary"),
-        "get_outbox_state_summary"
-      );
-      setOutboxSummary(s || { queued: 0, sending: 0, failed: 0 });
-    } catch (e: any) {
-      addLog(String(e?.message || e));
-      setOutboxSummary({ queued: 0, sending: 0, failed: 0 });
-    }
-  };
-
-  const loadThreadMessages = async (threadId: string) => {
-    try {
-      setExportMenuOpen(false);
-      const m = await unwrap<Message[]>(
-        invoke("get_thread_messages", { threadId }),
-        "get_thread_messages"
-      );
-      setMessages(m);
-      setSelectedThreadId(threadId);
-      await unwrap<boolean>(
-        invoke("mark_thread_read", { threadId }),
-        "mark_thread_read"
-      );
-      await refreshThreads();
-      await refreshPendingReplies(threadId);
-      await refreshDraftHistory(threadId);
-      await refreshOutbox(threadId);
-    } catch (e: any) {
-      addLog(String(e?.message || e));
-      // Allow "empty conversation" for contacts/groups with no persisted thread yet.
-      setSelectedThreadId(threadId);
-      setMessages([]);
-      await refreshPendingReplies(threadId);
-      await refreshDraftHistory(threadId);
-      await refreshOutbox(threadId);
-    }
-  };
-
-  const boot = async () => {
-    addLog("Boot…");
-    try {
-      const a = await unwrap<string[]>(
-        invoke("list_accounts"),
-        "list_accounts"
-      );
-      setAccounts(a || []);
-      if (!welcomeAccount && (a || []).length === 1) {
-        setWelcomeAccount((a || [])[0] || null);
-      }
-      const active = await unwrap<{ account_id: string | null }>(
-        invoke("get_active_account"),
-        "get_active_account"
-      );
-      setActiveAccount(active.account_id);
-      await refreshThreads();
-      await refreshAliases();
-      await refreshContactMeta();
-      await refreshCategories();
-      await refreshGroupMeta();
-      await refreshGroupCategories();
-      await refreshOutboxSummary();
-      await refreshDiagnostics();
-      await refreshReceiveLoopState();
-      addLog("Boot OK");
-    } catch (e: any) {
-      addLog(String(e?.message || e));
-    }
-  };
-
-  useEffect(() => {
-    if (!tauriAvailable) return;
-    boot();
-    // listeners
-    (async () => {
+    let product = res.data;
+    // If stock was fractional, re-upsert with milli via stock amount in stock_unit:
+    // backend already converted quantity_in_stock through stock_unit when milli was 0.
+    if (clearProductImageFlag && product.id) {
+      const cleared = await api.clearProductImage(product.id);
+      if (cleared.success) {
+        product = cleared.data;
+        setProductImages((prev) => {
+          const next = { ...prev };
+          delete next[product.id];
+          return next;
+        });
+      } else setStatus(cleared.error);
+    } else if (productImageFile && product.id) {
       try {
-        const u1 = await listen<Message>("message-received", async (event) => {
-          const msg = event.payload;
-          addLog(`event message-received: ${msg.thread_id} ${msg.id}`);
-          
-          const cur = selectedThreadIdRef.current;
-          
-          // If currently viewing this thread, reload its messages immediately for real-time display
-          if (cur && msg.thread_id === cur) {
-            // Add message optimistically for immediate UI update
-            setMessages((prev) => {
-              // Check if message already exists (avoid duplicates)
-              const exists = prev.some((m) => m.id === msg.id);
-              if (exists) return prev;
-              return [...prev, msg];
-            });
-            // Then reload from backend for canonical state
-            await loadThreadMessages(cur);
-          } else {
-            // For background threads, just refresh thread list to update unread counts
-            // This is more efficient than loading all messages
-            await refreshThreads();
-            
-            // Show notification for messages in other threads
-            if (msg.sender && msg.content) {
-              const senderName = msg.sender;
-              const preview = msg.content.length > 50 
-                ? msg.content.substring(0, 50) + "..." 
-                : msg.content;
-              showInfo(`New message from ${senderName}: ${preview}`);
-            }
-          }
-        });
-        const u2 = await listen<Message>("message-sent", async (event) => {
-          const msg = event.payload;
-          addLog(`event message-sent: ${msg.thread_id} ${msg.id}`);
-          const cur = selectedThreadIdRef.current;
-          
-          // Remove any optimistic messages for this thread
-          setMessages((prev) => prev.filter((m) => !m.id.startsWith("temp-")));
-          
-          if (cur && msg.thread_id === cur) {
-            // Reload messages to get the real message from backend
-            await loadThreadMessages(cur);
-          } else {
-            // Still refresh threads to update unread counts, etc.
-            await refreshThreads();
-          }
-        });
-        const u3 = await listen<AccountChangedPayload>(
-          "account-changed",
-          async (event) => {
-          const { account_id } = event.payload;
-          addLog(`event account-changed: ${account_id}`);
-          
-          // Clean up all state related to the previous account
-          setActiveAccount(account_id);
-          setSelectedThreadId(null);
-          setMessages([]);
-          setPendingReplies([]);
-          setDraftHistory([]);
-          setOutboxItems([]);
-          setExportMenuOpen(false);
-          setComposerText(""); // Clear composer
-          setSearchResults([]); // Clear search results
-          setContactPhotoUrls({}); // Clear photo cache
-          
-          // Update refs immediately for consistency
-          selectedThreadIdRef.current = null;
-          activeAccountRef.current = account_id;
-          
-          // Refresh all data for the new account
-          try {
-            await Promise.all([
-              refreshThreads(),
-              refreshAliases(),
-              refreshContactMeta(),
-              refreshCategories(),
-              refreshGroupMeta(),
-              refreshGroupCategories(),
-              refreshOutboxSummary(),
-              refreshDiagnostics(),
-              refreshReceiveLoopState(),
-            ]);
-          } catch (e: any) {
-            addLog(`Error refreshing data after account change: ${e?.message || e}`);
-            // Continue even if some refreshes fail
-          }
-          }
-        );
-        const u4 = await listen<any>("outbox-updated", async (event) => {
-          const payload = (event.payload || {}) as any;
-          const accountId = String(payload.account_id || "");
-          const threadId = payload.thread_id ? String(payload.thread_id) : null;
-          const summary = payload.summary as OutboxSummary | undefined;
-
-          if (summary) {
-            setOutboxSummary(summary);
-          } else {
-            await refreshOutboxSummary();
-          }
-
-          const curAccount = activeAccountRef.current;
-          if (curAccount && accountId && curAccount !== accountId) {
-            return;
-          }
-
-          const curThread = selectedThreadIdRef.current;
-          if (threadId && curThread && threadId === curThread) {
-            await refreshOutbox(threadId);
-          }
-        });
-
-        const u5 = await listen<OutboxItem>("outbox-item-updated", async (event) => {
-          const item = event.payload;
-          if (!item) return;
-          const curAccount = activeAccountRef.current;
-          if (curAccount && item.account_id && item.account_id !== curAccount) {
-            return;
-          }
-          const curThread = selectedThreadIdRef.current;
-          if (curThread && item.thread_id === curThread) {
-            await refreshOutbox(curThread);
-          }
-          await refreshOutboxSummary();
-        });
-
-        const u6 = await listen<any>("contact-meta-updated", async (event) => {
-          const payload = (event.payload || {}) as any;
-          const contact_id = String(payload.contact_id || "").trim();
-          if (!contact_id) return;
-          if (payload.deleted) {
-            setContactMeta((prev) => {
-              const next = { ...(prev || {}) };
-              delete next[contact_id];
-              return next;
-            });
-            await refreshCategories();
-            return;
-          }
-          try {
-            const m = await unwrap<ContactMeta | null>(
-              invoke("get_contact_meta", { contactId: contact_id }),
-              "get_contact_meta"
-            );
-            if (m) {
-              setContactMeta((prev) => ({ ...(prev || {}), [m.contact_id]: m }));
-            } else {
-              setContactMeta((prev) => {
-                const next = { ...(prev || {}) };
-                delete next[contact_id];
-                return next;
-              });
-            }
-            await refreshCategories();
-          } catch {
-            // ignore
-          }
-        });
-
-        const u7 = await listen<any>("group-meta-updated", async (event) => {
-          const payload = (event.payload || {}) as any;
-          const group_id = String(payload.group_id || "").trim();
-          if (!group_id) return;
-          if (payload.deleted) {
-            setGroupMeta((prev) => {
-              const next = { ...(prev || {}) };
-              delete next[group_id];
-              return next;
-            });
-            await refreshGroupCategories();
-            return;
-          }
-          try {
-            const m = await unwrap<GroupMeta | null>(
-              invoke("get_group_meta", { groupId: group_id }),
-              "get_group_meta"
-            );
-            if (m) {
-              setGroupMeta((prev) => ({ ...(prev || {}), [m.group_id]: m }));
-            } else {
-              setGroupMeta((prev) => {
-                const next = { ...(prev || {}) };
-                delete next[group_id];
-                return next;
-              });
-            }
-            await refreshGroupCategories();
-          } catch {
-            // ignore
-          }
-        });
-
-        unlistenRefs.current.push(u1, u2, u3, u4, u5, u6, u7);
-      } catch (e: any) {
-        addLog(`listen error: ${String(e?.message || e)}`);
+        const { b64, ext } = await fileToBase64(productImageFile);
+        const img = await api.setProductImage(product.id, b64, ext);
+        if (img.success) product = img.data;
+        else setStatus(img.error);
+      } catch (e) {
+        setStatus(`Image upload failed: ${String(e)}`);
       }
-    })();
-
-    return () => {
-      for (const u of unlistenRefs.current) u();
-      unlistenRefs.current = [];
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Lightweight periodic diagnostics refresh (NOT receive polling)
-  useEffect(() => {
-    const id = window.setInterval(() => {
-      refreshReceiveLoopState();
-    }, 5000);
-    return () => window.clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Diagnostics/Debug entry points are removed in Step 4 (reintroduced in Step 5 via Developer Mode).
-
-  useEffect(() => {
-    if (selectedThreadId) {
-      setShowWelcome(false);
     }
-  }, [selectedThreadId]);
-
-  // Resizable layout handlers (sidebar + Tools panel)
-  useEffect(() => {
-    const onMove = (e: MouseEvent) => {
-      if (!dragging) return;
-      const total = window.innerWidth;
-      const minSidebar = 240;
-      const minTools = 320;
-      const handleWidth = 12; // account for resizer(s)
-      if (dragging === "sidebar") {
-        const maxSidebar =
-          total - (toolsOpen ? toolsWidth : 0) - minTools - handleWidth;
-        const next = Math.min(
-          Math.max(e.clientX, minSidebar),
-          Math.max(minSidebar, maxSidebar)
-        );
-        setSidebarWidth(next);
-      } else if (dragging === "tools") {
-        const fromRight = total - e.clientX;
-        const maxTools = Math.min(520, Math.max(320, Math.floor(total * 0.45)));
-        const next = Math.min(Math.max(fromRight, minTools), maxTools);
-        setToolsWidth(next);
-      }
-    };
-    const onUp = () => setDragging(null);
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-    return () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
-  }, [dragging, sidebarWidth, toolsOpen, toolsWidth]);
-
-  const onAccountChange = async (accountId: string) => {
-    try {
-      await unwrap<boolean>(
-        invoke("set_active_account", { accountId }),
-        "set_active_account"
-      );
-      // backend emits account-changed; UI updates via listener
-    } catch (e: any) {
-      addLog(String(e?.message || e));
-    }
+    resetProductForm();
+    setStatus(productForm.id ? `Updated ${product.name}` : `Added ${product.name}`);
+    await refreshMeta();
   };
 
-  const sendMessage = async () => {
-    if (!selectedThreadId) {
-      showError("Please select a conversation first");
-      return;
-    }
-    const text = composerText.trim();
-    if (!text) {
-      showError("Message cannot be empty");
-      return;
-    }
-
-    // Optimistic UI update: add message to UI immediately
-    const optimisticMessage: Message = {
-      id: `temp-${Date.now()}`,
-      thread_id: selectedThreadId,
-      timestamp: Date.now(),
-      sender: activeAccountRef.current || "",
-      recipient: null,
-      content: text,
-      direction: "Outgoing",
-    };
-    setMessages((prev) => [...prev, optimisticMessage]);
-    setComposerText("");
-    setSending(true);
-
-    try {
-      const result = await unwrap<any>(
-        invoke("queue_outgoing_message", {
-          threadId: selectedThreadId,
-          recipient: "",
-          content: text,
-        }),
-        "queue_outgoing_message"
-      );
-      
-      // Refresh outbox to show queued message
-      await refreshOutbox(selectedThreadId);
-      await refreshOutboxSummary();
-      
-      showSuccess("Message queued for sending");
-      addLog("Queued message for send");
-      
-      // The message-sent event will update the UI with the real message
-      // Remove optimistic message when real one arrives
-    } catch (e: any) {
-      // Remove optimistic message on error
-      setMessages((prev) => prev.filter((m) => m.id !== optimisticMessage.id));
-      
-      const errorMsg = getUserFriendlyMessage(e);
-      
-      // Enhanced error handling for specific error types
-      if (errorMsg.toLowerCase().includes("thread_id") || errorMsg.toLowerCase().includes("thread")) {
-        showError("Invalid conversation. Please select a valid conversation.");
-      } else if (errorMsg.toLowerCase().includes("account") || errorMsg.toLowerCase().includes("active")) {
-        showError("No active account. Please select an account first.");
-      } else if (errorMsg.toLowerCase().includes("network") || errorMsg.toLowerCase().includes("connection")) {
-        showError("Network error. Message will be retried automatically.");
-      } else {
-        showError(`Failed to send message: ${errorMsg}`);
+  const editProduct = async (p: Product) => {
+    const stockU = (p.stock_unit || p.base_unit || p.unit || "ea").trim();
+    const base = (p.base_unit || p.unit || "ea").trim();
+    const stockAmt =
+      p.quantity_base_milli > 0
+        ? formatQty(stockQtyFromMilli(p.quantity_base_milli, stockU, base))
+        : String(p.quantity_in_stock ?? 0);
+    setProductForm({
+      id: p.id,
+      name: p.name,
+      description: p.description || "",
+      price: (p.price_cents / 100).toFixed(2),
+      cost: ((p.cost_cents || 0) / 100).toFixed(2),
+      supplier: p.supplier || "",
+      stock: stockAmt,
+      sku: p.sku || "",
+      baseUnit: p.base_unit || p.unit || "ea",
+      stockUnit: p.stock_unit || "",
+      salesUnit: p.sales_unit || "",
+      weight: p.weight > 0 ? String(p.weight) : "",
+      weightUnit: p.weight_unit || "g",
+      imagePath: p.image_path || "",
+      lowStockThreshold:
+        (p.low_stock_threshold_milli ?? 0) > 0
+          ? lowStockThresholdLabel(p.low_stock_threshold_milli)
+          : "",
+    });
+    setSellPacks(packsFromProduct(p));
+    setProductImageFile(null);
+    setClearProductImageFlag(false);
+    setProductImagePreview(null);
+    if (p.image_path) {
+      const img = await api.getProductImage(p.id);
+      if (img.success) {
+        setProductImagePreview(`data:${img.data.mime};base64,${img.data.bytes_base64}`);
       }
-      
-      addLog(`Send error: ${errorMsg}`);
-      // Restore text to composer on error
-      setComposerText(text);
+    }
+    setStatus(`Editing ${p.name}`);
+    setCatalogFormOpen(true);
+  };
+
+  const openNewDm = async () => {
+    const phone = normalizePhoneInput(newDmPhone);
+    if (!phone) {
+      setNewDmError("Enter a phone as +E164 (e.g. +15551234567)");
+      setStatus("Enter a phone as +E164 (e.g. +15551234567)");
+      return;
+    }
+    setNewDmError(null);
+    const tid = `dm:${phone}`;
+    const res = await api.setContactMeta(tid, {});
+    if (!res.success) {
+      setStatus(res.error);
+      return;
+    }
+    setMessages([]);
+    setOutbox([]);
+    setSelectedId(tid);
+    setPanel("threads");
+    setNewDmPhone("");
+    setNewDmOpen(false);
+    setStatus(`Compose to ${phone}`);
+    await refreshMeta();
+    await refreshThreads();
+  };
+
+  const addContact = async () => {
+    const phone = normalizePhoneInput(contactForm.phone);
+    if (!phone) {
+      setStatus("Contact phone must be +E164 (e.g. +15551234567)");
+      return;
+    }
+    const tid = `dm:${phone}`;
+    const res = await api.setContactMeta(tid, {
+      display_name: contactForm.name.trim() || null,
+    });
+    if (!res.success) {
+      setStatus(res.error);
+      return;
+    }
+    setContactForm({ phone: "", name: "" });
+    setStatus(`Contact saved: ${res.data.display_name || phone}`);
+    await refreshMeta();
+  };
+
+  const createGroup = async () => {
+    const name = groupForm.name.trim();
+    if (!name) {
+      setStatus("Group name required");
+      return;
+    }
+    const members = groupForm.members
+      .split(/[\s,;]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (members.length === 0) {
+      setStatus("Add at least one member phone (+E164)");
+      return;
+    }
+    const res = await api.createSignalGroup(name, members);
+    if (!res.success) {
+      setStatus(res.error);
+      return;
+    }
+    setGroupForm({ name: "", members: "" });
+    setPeopleKey(res.data.thread_id);
+    setStatus(`Group created: ${name}`);
+    await refreshMeta();
+    await refreshThreads();
+  };
+
+  const removeProduct = async (id: string) => {
+    const sku = products.find((p) => p.id === id)?.sku?.trim();
+    const open = orders.filter(
+      (o) =>
+        ["draft", "confirmed", "invoiced"].includes(o.status) &&
+        o.lines.some((l) => l.product_id === id),
+    );
+    const warn = open.length
+      ? `\n\nThis SKU is on ${open.length} open order${open.length === 1 ? "" : "s"}${sku ? ` (${sku})` : ""}.`
+      : "";
+    if (!window.confirm(`Delete this product?${warn}`)) return;
+    const res = await api.deleteProduct(id);
+    if (!res.success) {
+      setStatus(res.error);
+      return;
+    }
+    setProductImages((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    await refreshMeta();
+  };
+
+  const linkCustomerFromThread = async () => {
+    if (!selectedId || isGroupThread(selectedId)) {
+      setStatus("Select a DM thread first");
+      return;
+    }
+    const res = await api.ensureCustomerForThread(
+      selectedId,
+      threadTitle(selectedId, contacts, groups, customers),
+    );
+    if (!res.success) {
+      setStatus(res.error);
+      return;
+    }
+    setStatus(`Customer linked: ${res.data.display_name || res.data.thread_id}`);
+    await refreshMeta();
+  };
+
+
+  const placeOrder = async (asDraft = false) => {
+    if (!selectedId || isGroupThread(selectedId)) {
+      setStatus(asDraft ? "Select a DM thread to create a quote" : "Select a DM thread to place an order");
+      return;
+    }
+    const pid = orderProductId || products[0]?.id;
+    if (!pid) {
+      setStatus("Add a product first");
+      return;
+    }
+    const product = products.find((p) => p.id === pid);
+    const sellOpt = orderSellOptionId
+      ? product?.sell_options?.find((o) => o.id === orderSellOptionId)
+      : undefined;
+    const qty = sellOpt
+      ? sellOpt.amount
+      : Math.max(0.001, Number(orderQty) || 1);
+    const unit = sellOpt
+      ? sellOpt.unit
+      : productUnit(product || { unit: "ea" });
+    const res = await api.createOrder(
+      selectedId,
+      [
+        {
+          productId: pid,
+          quantity: qty,
+          unit,
+          sellOptionId: sellOpt?.id,
+        },
+      ],
+      asDraft,
+    );
+    if (!res.success) {
+      setStatus(res.error);
+      return;
+    }
+    setStatus(
+      asDraft
+        ? `Quote ${res.data.id.slice(0, 8)} drafted — $${(res.data.total_cents / 100).toFixed(2)}`
+        : `Order ${res.data.id.slice(0, 8)} created — $${(res.data.total_cents / 100).toFixed(2)}`,
+    );
+    await refreshMeta();
+    setPanel("orders");
+  };
+
+  const sendQuote = async (id: string) => {
+    const res = await api.sendOrderQuote(id);
+    if (!res.success) setStatus(res.error);
+    else setStatus("Quote queued to Signal outbox");
+    if (selectedId) await refreshMessages(selectedId);
+    await refreshMeta();
+  };
+
+  const confirmDraftOrder = async (id: string) => {
+    const res = await api.confirmOrder(id);
+    if (!res.success) setStatus(res.error);
+    else setStatus(`Order ${id.slice(0, 8)} confirmed`);
+    await refreshMeta();
+  };
+
+  const duplicateAsDraft = async (id: string) => {
+    const res = await api.duplicateOrderAsDraft(id);
+    if (!res.success) {
+      setStatus(res.error);
+      return null;
+    }
+    setStatus(`Draft ${res.data.id.slice(0, 8)} from ${id.slice(0, 8)}`);
+    await refreshMeta();
+    setFocusOrderId(res.data.id);
+    setPanel("orders");
+    return res.data;
+  };
+
+  const editDraftFirstLineQty = async (o: Order) => {
+    const line = o.lines[0];
+    if (!line) {
+      setStatus("Draft has no lines");
+      return;
+    }
+    const raw = window.prompt(
+      `New qty for ${line.name} (${line.unit || "ea"})`,
+      String(line.quantity),
+    );
+    if (raw == null) return;
+    const qty = Number(raw);
+    if (!Number.isFinite(qty) || qty <= 0) {
+      setStatus("Qty must be a number > 0");
+      return;
+    }
+    const res = await api.updateDraftOrderLines(o.id, [
+      {
+        productId: line.product_id,
+        quantity: qty,
+        unit: line.unit || "",
+      },
+    ]);
+    if (!res.success) setStatus(res.error);
+    else setStatus(`Draft ${o.id.slice(0, 8)} lines updated`);
+    await refreshMeta();
+  };
+
+  const adjustStock = async (p: Product, delta: number) => {
+    const reason =
+      window.prompt(
+        `Adjust ${p.name} by ${delta > 0 ? "+" : ""}${delta} (${(p.stock_unit || p.base_unit || p.unit || "ea").trim()}) — reason (optional)`,
+        "",
+      ) ?? undefined;
+    if (reason === undefined) return; // cancelled
+    const res = await api.adjustProductStock(p.id, delta, reason.trim() || undefined);
+    if (!res.success) setStatus(res.error);
+    else setStatus(`Stock updated: ${p.name} → ${productStockLabel(res.data)}`);
+    await refreshMeta();
+  };
+
+  const exportProductsCsv = async () => {
+    const res = await api.exportProductsCsv();
+    if (!res.success) {
+      setStatus(res.error);
+      return;
+    }
+    await api.openPath(res.data.path);
+    setStatus(`Products CSV exported (${res.data.bytes} bytes)`);
+  };
+
+  const importProductsCsvFile = async (file: File | null) => {
+    if (!file) return;
+    const csv = await file.text();
+    const dry = await api.importProductsCsv(csv, true);
+    if (!dry.success) {
+      setStatus(dry.error);
+      return;
+    }
+    const preview = dry.data;
+    const errHint =
+      preview.errors.length > 0
+        ? `\nErrors (sample): ${preview.errors.slice(0, 3).join("; ")}`
+        : "";
+    const ok = window.confirm(
+      `CSV dry-run: ${preview.creates} creates, ${preview.upserts} upserts` +
+        (preview.sample.length ? `\nSample: ${preview.sample.slice(0, 3).join(", ")}` : "") +
+        errHint +
+        "\n\nApply import?",
+    );
+    if (!ok) {
+      setStatus(
+        `Dry-run only: ${preview.creates} creates, ${preview.upserts} upserts` +
+          (preview.errors.length ? ` · ${preview.errors.length} row errors` : ""),
+      );
+      return;
+    }
+    const apply = await api.importProductsCsv(csv, false);
+    if (!apply.success) {
+      setStatus(apply.error);
+      return;
+    }
+    setStatus(
+      `Imported: ${apply.data.creates} creates, ${apply.data.upserts} upserts` +
+        (apply.data.errors.length ? ` · ${apply.data.errors.length} row errors` : ""),
+    );
+    await refreshMeta();
+  };
+
+  const loadIvrMenusEditor = async () => {
+    if (!canInvoke()) {
+      setIvrMenusDraft((cur) => cur ?? emptyMenus());
+      setIvrMenusError(null);
+      return;
+    }
+    const res = await api.getIvrMenus();
+    if (!res.success) {
+      if (!isDesktopUnavailable(res.error)) setIvrMenusError(res.error);
+      return;
+    }
+    setIvrMenusDraft(res.data);
+    setIvrMenusError(null);
+  };
+
+  const saveIvrMenusDraft = async () => {
+    if (!ivrMenusDraft) {
+      setStatus("Load menus first");
+      return;
+    }
+    setIvrMenusBusy(true);
+    setIvrMenusError(null);
+    try {
+      const res = await api.setIvrMenus(ivrMenusDraft);
+      if (!res.success) {
+        setIvrMenusError(res.error);
+        return;
+      }
+      setIvrMenusDraft(res.data);
+      setStatus("Buyer menu saved");
     } finally {
-      setSending(false);
+      setIvrMenusBusy(false);
     }
   };
 
-  const enqueueSendText = async (threadId: string, text: string) => {
-    const msg = text.trim();
-    if (!msg) return;
-    await unwrap<any>(
-      invoke("queue_outgoing_message", {
-        threadId,
-        recipient: "",
-        content: msg,
-      }),
-      "queue_outgoing_message"
+  const resetIvrMenusDemo = async () => {
+    if (!window.confirm("Replace your menu with the built-in starter demo?")) return;
+    setIvrMenusBusy(true);
+    const res = await api.resetIvrMenus();
+    setIvrMenusBusy(false);
+    if (!res.success) {
+      setIvrMenusError(res.error);
+      return;
+    }
+    setIvrMenusDraft(res.data);
+    setIvrMenusError(null);
+    setStatus("Starter demo menu loaded — save if you want to keep it");
+  };
+
+  const previewIvrPath = async (inputs: string[]) => {
+    if (inputs.length === 0) {
+      setIvrPreviewSteps([]);
+      return;
+    }
+    const res = await api.previewIvrPath(inputs);
+    if (!res.success) {
+      if (!isDesktopUnavailable(res.error)) {
+        setIvrMenusError(res.error);
+      }
+      return;
+    }
+    setIvrPreviewSteps(res.data);
+    setIvrMenusError(null);
+  };
+
+  const refreshGlobalOutbox = async () => {
+    const [list, sum] = await Promise.all([api.listOutbox(), api.getOutboxSummary()]);
+    if (list.success) {
+      setGlobalOutbox(
+        list.data
+          .filter((i) => i.state !== "sent")
+          .sort((a, b) => b.created_at - a.created_at),
+      );
+    }
+    if (sum.success) setOutboxSummary(sum.data);
+  };
+
+  const setOrderLifecycle = async (id: string, status: string) => {
+    const res = await api.setOrderStatus(id, status);
+    if (!res.success) setStatus(res.error);
+    else setStatus(`Order → ${status}`);
+    await refreshMeta();
+  };
+
+  const sendInvoice = async (id: string) => {
+    const res = await api.sendOrderInvoice(id);
+    if (!res.success) setStatus(res.error);
+    else setStatus("Invoice queued to Signal outbox");
+    if (selectedId) await refreshMessages(selectedId);
+  };
+
+  const onExportDataBundle = async () => {
+    setBackupBusy(true);
+    const res = await api.exportDataBundle(backupPassword);
+    setBackupBusy(false);
+    if (!res.success) {
+      setStatus(res.error);
+      return;
+    }
+    await api.openPath(res.data.path);
+    setStatus(
+      `Data bundle exported (${res.data.counts.files} files, ${res.data.counts.attachments} attachments)`,
     );
   };
 
-  const setAlias = async () => {
-    const num = aliasNumber.trim();
-    const al = aliasValue.trim();
-    if (!num || !al) return;
+  const onImportDataBundleFile = async (file: File | null) => {
+    if (!file) return;
+    if (restartRequired) {
+      setStatus("Restart SignalX before importing again");
+      return;
+    }
+    const ok = window.confirm(
+      `Import data bundle (${importMode})?\n\n` +
+        "This does NOT move Signal registration — Device link and .signalx.env are still required on a new machine.\n\n" +
+        (importMode === "replace"
+          ? "Replace will overwrite catalog, orders, IVR, threads, and related stores for this account (current files are snapshotted under exports/pre-import-*)."
+          : "Merge will union messages/outbox by id and upsert commerce; restart is still required."),
+    );
+    if (!ok) return;
+    setBackupBusy(true);
     try {
-      await unwrap<boolean>(
-        invoke("set_alias", { number: num, alias: al }),
-        "set_alias"
+      const { b64 } = await fileToBase64(file);
+      const res = await api.importDataBundle({
+        bytesBase64: b64,
+        mode: importMode,
+        password: backupPassword,
+      });
+      if (!res.success) {
+        setStatus(res.error);
+        return;
+      }
+      setRestartRequired(true);
+      setStatus(
+        `Import OK (${res.data.files_written} files). Restart SignalX to apply — writes are locked until then.`,
       );
-      setAliasNumber("");
-      setAliasValue("");
-      await refreshAliases();
-    } catch (e: any) {
-      addLog(String(e?.message || e));
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBackupBusy(false);
     }
   };
 
-  const doSearch = async () => {
-    const q = searchQuery.trim();
-    if (!q) {
-      setSearchResults([]);
-      return;
-    }
-    setSearching(true);
+  const quitForRestart = async () => {
     try {
-      const res = await unwrap<SearchResult[]>(
-        invoke("search_messages", {
-          query: q,
-          limit: 50,
-          threadId: null,
-          sender: searchSender.trim() || null,
-          afterTs: searchAfter ? Number(searchAfter) : null,
-          beforeTs: searchBefore ? Number(searchBefore) : null,
-        }),
-        "search_messages"
-      );
-      setSearchResults(res || []);
-      if (res && res.length === 0) {
-        showInfo("No messages found");
-      }
-    } catch (e: any) {
-      const errorMsg = getUserFriendlyMessage(e);
-      showError(`Search failed: ${errorMsg}`);
-      addLog(`Search error: ${errorMsg}`);
-    } finally {
-      setSearching(false);
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      await getCurrentWindow().close();
+    } catch {
+      setStatus("Close the SignalX window, then reopen to finish import.");
     }
   };
 
   useEffect(() => {
-    const t = window.setTimeout(() => doSearch(), 250);
-    return () => window.clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchQuery]);
+    if (panel === "outbox") void refreshGlobalOutbox();
+    if (panel === "audit") {
+      void api.listAutoReplyAudit(80).then((r) => {
+        if (r.success) setAudit(r.data);
+      });
+      void api.listCommerceAudit(80).then((r) => {
+        if (r.success) setCommerceAudit(r.data);
+      });
+      void api.listIvrAudit(80).then((r) => {
+        if (r.success) setIvrAudit(r.data);
+      });
+      void api.listOutboxAudit(80).then((r) => {
+        if (r.success) setOutboxAudit(r.data);
+      });
+    }
+  }, [panel]);
 
-  const openSearchResult = async (r: SearchResult) => {
-    await loadThreadMessages(r.thread_id);
-    // Jump-to-message
-    const el = document.getElementById(`msg-${r.message_id}`);
-    if (el) {
-      el.scrollIntoView({ behavior: "smooth", block: "center" });
-      el.animate(
-        [
-          { boxShadow: "0 0 0 rgba(0,0,0,0)" },
-          { boxShadow: "0 0 0 2px #38bdf8" },
-          { boxShadow: "0 0 0 rgba(0,0,0,0)" },
-        ],
-        {
-          duration: 1200,
-          easing: "ease-out",
+  useEffect(() => {
+    if (panel === "settings" && settingsTab === "ivr" && !ivrMenusDraft) {
+      void loadIvrMenusEditor();
+    }
+  }, [panel, settingsTab]);
+
+  const title = selectedId ? threadTitle(selectedId, contacts, groups, customers) : "SignalX";
+  // Product thumbnails arrive as base64 over the API, one call each, so fetch
+  // them lazily for the catalog grid and keep what we've already resolved.
+  useEffect(() => {
+    if (panel !== "catalog" && panel !== "products") return;
+    const missing = products.filter((p) => p.image_path && !productImagesReal[p.id]);
+    if (missing.length === 0) return;
+    let cancelled = false;
+    void (async () => {
+      const resolved: Record<string, string> = {};
+      for (const p of missing) {
+        const img = await api.getProductImage(p.id);
+        if (img.success) {
+          resolved[p.id] = `data:${img.data.mime};base64,${img.data.bytes_base64}`;
         }
-      );
-    }
+      }
+      if (!cancelled && Object.keys(resolved).length > 0) {
+        setProductImages((prev) => ({ ...prev, ...resolved }));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [panel, products]);
+
+  const showProfileRail = panel === "threads" && !!selectedId;
+  // Only panels that render their own list column have a list seam; the wide
+  // panels span both tracks and so expose just the rail edge.
+  const panelLayout: PanelLayout = {
+    listKey:
+      panel === "people" || panel === "catalog" || panel === "products"
+        ? "listPeople"
+        : panel === "threads"
+          ? "list"
+          : null,
+    aside: showProfileRail,
   };
+  const { shellRef, styleVars, beginDrag, resetColumn, nudge } = usePanelWidths(panelLayout);
+  const profileContact = selectedId
+    ? contacts.find((c) => {
+        const raw = selectedId.replace(/^dm:/, "");
+        return (
+          c.contact_id === selectedId ||
+          c.contact_id === raw ||
+          c.contact_id === `dm:${raw}`
+        );
+      }) ?? null
+    : null;
+  const profileCustomer = selectedId
+    ? customers.find((c) => c.thread_id === selectedId) ?? null
+    : null;
+  const ivrHint = ivrInactiveReason(threadIvr);
 
-  const aiSummarize = async () => {
-    if (!selectedThreadId) return;
-    try {
-      const out = await unwrap<string>(
-        invoke("summarize_thread", { threadId: selectedThreadId, lastN: 50 }),
-        "summarize_thread"
-      );
-      setAiOutput(out);
-    } catch (e: any) {
-      addLog(String(e?.message || e));
-    }
-  };
+  const filteredThreads = useMemo(() => {
+    return threads.filter((t) => {
+      if (threadFilter.kind === "dm" && isGroupThread(t.id)) return false;
+      if (threadFilter.kind === "group" && !isGroupThread(t.id)) return false;
+      if (threadFilter.unread && t.unread_count <= 0) return false;
+      if (threadFilter.pending && t.outbox_count <= 0) return false;
+      if (!searchQ.trim()) return true;
+      const label = threadTitle(t.id, contacts, groups, customers);
+      return includesQ(`${label} ${t.id} ${t.last_preview ?? ""}`, searchQ);
+    });
+  }, [threads, threadFilter, searchQ, contacts, groups, customers]);
 
-  const aiDraft = async () => {
-    if (!selectedThreadId) return;
-    try {
-      const out = await unwrap<string>(
-        invoke("draft_reply", {
-          threadId: selectedThreadId,
-          intent: aiIntent,
-          constraints: aiConstraints,
-          lastN: 50,
-        }),
-        "draft_reply"
-      );
-      setAiOutput(out);
-      setComposerText(out);
-    } catch (e: any) {
-      addLog(String(e?.message || e));
-    }
-  };
-
-  const exportThread = async (format: "txt" | "json") => {
-    if (!selectedThreadId) return;
-    setExportMenuOpen(false);
-    setExporting(true);
-    setExportResult(null);
-    try {
-      const result = await unwrap<{
-        path: string;
-        format: string;
-        message_count: number;
-      }>(
-        invoke("export_thread", {
-          threadId: selectedThreadId,
-          format,
-          fromTs: null,
-          toTs: null,
-        }),
-        "export_thread"
-      );
-      setExportResult(result);
-      addLog(`Exported ${result.message_count} messages to ${result.path}`);
-      showSuccess(
-        `Exported ${
-          result.message_count
-        } messages (${result.format.toUpperCase()}) to ${result.path}`
-      );
-    } catch (e: any) {
-      addLog(String(e?.message || e));
-    } finally {
-      setExporting(false);
-    }
-  };
-
-  const openExportFolder = async (filePath: string) => {
-    try {
-      // Extract directory from file path
-      const dirPath = filePath.substring(0, filePath.lastIndexOf("/"));
-      // Use Tauri command to open folder (macOS: open command)
-      await invoke("open_path", { path: dirPath });
-    } catch (e: any) {
-      addLog(`Failed to open folder: ${e?.message || e}`);
-    }
-  };
-
-  const dismissDraft = async (messageId: string) => {
-    if (!selectedThreadId) return;
-    try {
-      await unwrap<{ consumed: boolean }>(
-        invoke("mark_pending_reply_consumed", {
-          threadId: selectedThreadId,
-          messageId,
-        }),
-        "mark_pending_reply_consumed"
-      );
-      await refreshPendingReplies(selectedThreadId);
-    } catch (e: any) {
-      addLog(String(e?.message || e));
-    }
-  };
-
-  const useDraft = async (draft: PendingReply) => {
-    setComposerText(draft.draft);
-    setShowWelcome(false);
-    if (selectedThreadId) {
-      await dismissDraft(draft.message_id);
-    }
-  };
-
-  const useAndSendDraft = async (draft: PendingReply) => {
-    if (!selectedThreadId) return;
-    const threadId = selectedThreadId;
-    const msg = (draft.draft || "").trim();
-    if (!msg) return;
-
-    setSending(true);
-    try {
-      // Don't rely on React state updates for the message content.
-      // Also: only consume the pending draft after we successfully enqueue the send.
-      await enqueueSendText(threadId, msg);
-      setComposerText("");
-      await dismissDraft(draft.message_id);
-      addLog("Queued message for send (from agent draft)");
-    } catch (e: any) {
-      addLog(String(e?.message || e));
-    } finally {
-      setSending(false);
-    }
-  };
-
-  const retryOutbox = async (item: OutboxItem) => {
-    try {
-      await unwrap<any>(
-        invoke("retry_outbox_item", {
-          id: item.id,
-        }),
-        "retry_outbox_item"
-      );
-      await refreshOutbox(item.thread_id);
-      await refreshOutboxSummary();
-    } catch (e: any) {
-      addLog(String(e?.message || e));
-    }
-  };
-
-  const deleteOutbox = async (item: OutboxItem) => {
-    try {
-      await unwrap<any>(
-        invoke("delete_outbox_item", {
-          id: item.id,
-        }),
-        "delete_outbox_item"
-      );
-      await refreshOutbox(item.thread_id);
-      await refreshOutboxSummary();
-    } catch (e: any) {
-      addLog(String(e?.message || e));
-    }
-  };
-
-  const selectedThread = useMemo(
-    () => threads.find((t) => t.id === selectedThreadId) || null,
-    [threads, selectedThreadId]
+  const directory = useMemo(
+    () => buildDirectory(contacts, groups, customers, threads, orders),
+    [contacts, groups, customers, threads, orders],
   );
 
-  const failedOutboxForSelected = useMemo(() => {
-    if (!selectedThreadId) return [];
-    return (outboxItems || []).filter((o) => o.state === "failed");
-  }, [outboxItems, selectedThreadId]);
-
-  const retryFailedForSelected = async () => {
-    for (const it of failedOutboxForSelected) {
-      await retryOutbox(it);
+  const messageCorpus = useMemo(() => {
+    const map = new Map(messagesReal.map((m) => [m.id, m]));
+    if (USE_FIXTURES) {
+      for (const m of fxMessages) {
+        if (!map.has(m.id)) map.set(m.id, m);
+      }
     }
+    return [...map.values()];
+  }, [messagesReal]);
+
+  const filteredOrders = useMemo(() => {
+    let rows: Order[];
+
+    // Use smart matching if search query exists, otherwise use simple haystack
+    if (orderFilter.q.trim()) {
+      const partyOfLocal = (id: string) => threadTitle(id, contacts, groups, customers);
+      rows = matchingOrders(orders, orderFilter.q, directory, messageCorpus, partyOfLocal);
+    } else {
+      rows = orders;
+    }
+
+    // Apply thisThread filter
+    if (orderFilter.thisThread && selectedId) {
+      rows = rows.filter((o) => o.thread_id === selectedId);
+    }
+
+    return rows;
+  }, [orders, orderFilter.q, orderFilter.thisThread, selectedId, directory, messageCorpus, contacts, groups, customers, threadTitle]);
+
+  const partyOf = (id: string) => threadTitle(id, contacts, groups, customers);
+
+  const openSearchScope = (scope: SearchScope) => {
+    const q = searchQ;
+    setSearchScope(scope);
+    if (scope === "messages") {
+      setPanel("threads");
+      return;
+    }
+    if (scope === "people") {
+      setPeopleSearchQuery(q);
+      setPeopleSearchTick((n) => n + 1);
+      setPanel("people");
+      return;
+    }
+    if (scope === "catalog") {
+      setCatalogSearchQuery(q);
+      setCatalogSearchTick((n) => n + 1);
+      setPanel("catalog");
+      return;
+    }
+    setOrderFilter((f) => ({ ...f, q, thisThread: false }));
+    setPanel("orders");
   };
 
-  // Enhanced health badge calculation
-  const healthStatus = useMemo(() => {
-    if (!receiveState) {
-      return {
-        status: "unknown",
-        color: "#9ca3af",
-        label: "Unknown",
-        tooltip: "No receive state available",
-      };
+  const searchPeopleHits = useMemo(
+    () => matchingPeople(directory, searchLiveQ, messageCorpus, orders),
+    [directory, searchLiveQ, messageCorpus, orders],
+  );
+  const searchOrderHits = useMemo(
+    () => matchingOrders(orders, searchLiveQ, directory, messageCorpus, partyOf),
+    [orders, searchLiveQ, directory, messageCorpus, contacts, groups, customers],
+  );
+  const searchProductHits = useMemo(
+    () => matchingProducts(products, searchLiveQ, directory, orders, messageCorpus),
+    [products, searchLiveQ, directory, orders, messageCorpus],
+  );
+  const searchMessageHits = useMemo(
+    () => matchingMessages(searchLiveQ, directory, messageCorpus, searchHits, partyOf),
+    [searchLiveQ, directory, messageCorpus, searchHits, contacts, groups, customers],
+  );
+
+  const setupNeeded = useMemo(
+    () => needsDeviceSetup(diagnostics, health, linkStatus),
+    [diagnostics, health, linkStatus],
+  );
+
+  const openDeviceLinkSetup = () => {
+    setPanel("settings");
+    setSettingsTab("account");
+  };
+
+  const getThreadContextMenu = (threadId: string): ContextMenuItem[] => {
+    const menu = getMenuByObjectType("thread");
+    if (!menu) return [];
+    return menu.items.map((item) => ({
+      id: item.id,
+      label: item.label,
+      danger: item.danger,
+      action: () => {
+        switch (item.actionType) {
+          case "exportThread":
+            void onExportThread();
+            break;
+          case "copyId":
+            navigator.clipboard.writeText(threadId);
+            setStatus("Copied thread ID");
+            break;
+          case "deleteThread":
+            if (window.confirm("Delete this thread?")) {
+              setSelectedId(null);
+              setStatus("Thread deleted (local only)");
+            }
+            break;
+          case "divider":
+            break;
+        }
+      },
+    }));
+  };
+
+
+  const onUnlock = async () => {
+    const id = unlockId || session?.accounts[0]?.id;
+    if (!id) {
+      setStatus("No roster account to unlock");
+      return;
     }
-
-    const now = Date.now();
-
-    // Check cooldown first
-    if (receiveState.cooldown_until && now < receiveState.cooldown_until) {
-      const remaining = Math.ceil((receiveState.cooldown_until - now) / 1000);
-      return {
-        status: "cooldown",
-        color: "#f59e0b",
-        label: "Cooldown",
-        tooltip: `In cooldown for ${remaining}s\nFailures: ${
-          receiveState.consecutive_failures
-        }\nBackoff: ${receiveState.backoff_ms}ms\n${
-          receiveState.last_receive_error
-            ? `Error: ${receiveState.last_receive_error}`
-            : ""
-        }`,
-      };
+    setRosterBusy(true);
+    const res = await api.unlockAccount(id, sessionPin);
+    setRosterBusy(false);
+    if (!res.success) {
+      setStatus(res.error);
+      setUnlockError(res.error);
+      return;
     }
+    setSessionPin("");
+    setUnlockError(null);
+    applySession(res.data);
+    setStatus("Unlocked");
+    await bootstrap();
+  };
 
-    // Check for failures
-    if (receiveState.consecutive_failures > 0) {
-      return {
-        status: "error",
-        color: "#ef4444",
-        label: `Error (${receiveState.consecutive_failures})`,
-        tooltip: `Consecutive failures: ${
-          receiveState.consecutive_failures
-        }\nBackoff: ${receiveState.backoff_ms}ms\n${
-          receiveState.last_receive_error
-            ? `Error: ${receiveState.last_receive_error}`
-            : "No error message"
-        }`,
-      };
+  const onLock = async () => {
+    setAccountMenuOpen(false);
+    const res = await api.lockSession();
+    if (!res.success) {
+      setStatus(res.error);
+      return;
     }
+    applySession(res.data);
+    setStatus("Session locked");
+  };
 
-    // Check time since last success
-    if (!receiveState.last_receive_ok_at) {
-      return {
-        status: "idle",
-        color: "#9ca3af",
-        label: "Idle",
-        tooltip: "No receive activity yet\nBackoff: 0ms",
-      };
+  const onAddAccount = async (number: string, pin: string, label: string) => {
+    const normalized = normalizePhoneInput(number) || number.trim();
+    setRosterBusy(true);
+    const res = await api.addAccount(normalized, pin, label);
+    setRosterBusy(false);
+    if (!res.success) {
+      setStatus(res.error);
+      return;
     }
+    applySession(res.data);
+    setAddNumber("");
+    setAddPin("");
+    setAddLabel("");
+    setStatus("Account added to roster — unlock it to switch");
+  };
 
-    const timeSinceLastSuccess = now - receiveState.last_receive_ok_at;
-    const secondsAgo = Math.floor(timeSinceLastSuccess / 1000);
-
-    if (timeSinceLastSuccess < 15000) {
-      // < 15 seconds: Green
-      return {
-        status: "healthy",
-        color: "#10b981",
-        label: "Healthy",
-        tooltip: `Last success: ${secondsAgo}s ago\nBackoff: ${receiveState.backoff_ms}ms\nFailures: 0`,
-      };
-    } else if (timeSinceLastSuccess < 60000) {
-      // 15-60 seconds: Yellow
-      return {
-        status: "degraded",
-        color: "#f59e0b",
-        label: "Degraded",
-        tooltip: `Last success: ${secondsAgo}s ago\nBackoff: ${receiveState.backoff_ms}ms\nFailures: 0`,
-      };
-    } else {
-      // > 60 seconds: Red
-      return {
-        status: "stale",
-        color: "#ef4444",
-        label: "Stale",
-        tooltip: `Last success: ${secondsAgo}s ago\nBackoff: ${
-          receiveState.backoff_ms
-        }ms\nFailures: 0\n${
-          receiveState.last_receive_error
-            ? `Last error: ${receiveState.last_receive_error}`
-            : ""
-        }`,
-      };
-    }
-  }, [receiveState]);
+  if (!isTauriRuntime()) {
+    return (
+      <div className="shell desktop-gate">
+        <main className="desktop-gate-panel">
+          <p className="brand-mark">SignalX</p>
+          <h1>Open the desktop app</h1>
+          <p>
+            This browser view is layout-only. Messaging, Signal linking, and your catalog run in the
+            local SignalX window.
+          </p>
+          <pre className="desktop-gate-cmd">./run-dev.sh</pre>
+          <p className="hint tight">
+            Or double-click <code>SignalX-Dev.command</code>. Needs Rust 1.88+ (see{" "}
+            <code>rust-toolchain.toml</code>) and Node. Production build:{" "}
+            <code>npm run desktop:build</code>
+          </p>
+        </main>
+      </div>
+    );
+  }
 
   return (
     <div
-      style={{
-        display: "flex",
-        height: "100%",
-        background: "#0b0d10",
-        color: "#e5e7eb",
-        fontFamily: "system-ui",
-        overflow: "hidden",
-      }}
+      ref={shellRef}
+      style={styleVars}
+      className={[
+        "shell",
+        showProfileRail ? "shell-with-profile" : "",
+        panel === "people" || panel === "catalog" || panel === "products" ? "shell-people" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
     >
-      {/* Accessibility: Skip Navigation Links */}
-      <SkipLink href="#sidebar">Skip to sidebar</SkipLink>
-      <SkipLink href="#main-content">Skip to main content</SkipLink>
-      <SkipLink href="#message-composer">Skip to message composer</SkipLink>
-
-      {/* Sidebar */}
-      <div
-        id="sidebar"
-        style={{
-          width: sidebarWidth,
-          minWidth: 240,
-          borderRight: "1px solid #1f2937",
-          display: "flex",
-          flexDirection: "column",
-        }}
-      >
-        <div style={{ padding: 12, borderBottom: "1px solid #1f2937" }}>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              gap: 8,
-            }}
-          >
-            <div style={{ fontWeight: 700 }}>SignalX</div>
-            {outboxSummary.queued + outboxSummary.failed > 0 ? (
-              <div
-                title={`Outbox: ${outboxSummary.queued} queued, ${outboxSummary.failed} failed`}
-                style={{
-                  fontSize: 12,
-                  padding: "2px 8px",
-                  borderRadius: 999,
-                  background: "#0f172a",
-                  color: outboxSummary.failed > 0 ? "#fca5a5" : "#67e8f9",
-                  border:
-                    outboxSummary.failed > 0
-                      ? "1px solid #7f1d1d"
-                      : "1px solid #155e75",
-                  fontWeight: 700,
-                }}
-              >
-                Outbox {outboxSummary.queued + outboxSummary.failed}
-              </div>
-            ) : null}
-          </div>
-
-          <div style={{ marginTop: 8, fontSize: 12, color: "#9ca3af" }}>
-            Receive:{" "}
-            <span
-              style={{
-                color: healthStatus.color,
-                fontWeight: 600,
-                cursor: "help",
-              }}
-              title={healthStatus.tooltip}
-            >
-              {healthStatus.label}
-            </span>
-          </div>
-
-          <div
-            style={{
-              marginTop: 10,
-              display: "flex",
-              gap: 8,
-              alignItems: "center",
-            }}
-          >
-            <Select
-              value={activeAccount || ""}
-              onChange={(e) => onAccountChange(e.target.value)}
-              options={[
-                { value: "", label: "Select account…", disabled: true },
-                ...accounts.map((a) => ({ value: a, label: a })),
-              ]}
-              fullWidth
-              size="sm"
-            />
-            <Button
-              onClick={() => boot()}
-              variant="secondary"
-              size="sm"
-              icon="↻"
-              iconPosition="left"
-            >
-              Boot
-            </Button>
-          </div>
-
-          {/* Navigation tabs */}
-          <div style={{ marginTop: 10 }}>
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(3, 1fr)",
-                gap: 6,
-                background: "#0b0d10",
-                border: "1px solid #1f2937",
-                borderRadius: 10,
-                padding: 4,
-              }}
-            >
-              {(["contacts", "groups", "threads"] as const).map((t) => (
-                <Button
-                  key={t}
+      {panelLayout.listKey && (
+        <PanelResizer
+          column={panelLayout.listKey}
+          seam="list"
+          label="Resize list column"
+          onBegin={beginDrag}
+          onReset={resetColumn}
+          onNudge={nudge}
+        />
+      )}
+      {panelLayout.aside && (
+        <PanelResizer
+          column="aside"
+          seam="aside"
+          label="Resize detail column"
+          onBegin={beginDrag}
+          onReset={resetColumn}
+          onNudge={nudge}
+        />
+      )}
+      {restartRequired && (
+        <div className="restart-banner" role="alert">
+          <span>Imported data is on disk — quit and reopen SignalX to load it.</span>
+          <button type="button" className="action-btn primary" onClick={() => void quitForRestart()}>
+            Quit now
+          </button>
+        </div>
+      )}
+      {session?.locked && (
+        <div className="lock-overlay" role="dialog" aria-modal="true" aria-labelledby="lock-title">
+          <div className="lock-card">
+            <p className="brand-mark">SignalX</p>
+            <h1 id="lock-title">Unlock account</h1>
+            <p className="hint tight">One live session. Locked numbers do not send or receive.</p>
+            <div className="lock-accounts">
+              {(session.accounts.length ? session.accounts : []).map((a) => (
+                <button
+                  key={a.id}
+                  type="button"
+                  className={unlockId === a.id ? "lock-account active" : "lock-account"}
                   onClick={() => {
-                    setNavTab(t);
-                    setPeopleQuery("");
-                    setContactFieldOpen(false);
-                    setGroupFieldOpen(false);
+                    setUnlockId(a.id);
+                    setUnlockError(null);
                   }}
-                  variant={navTab === t ? "secondary" : "ghost"}
-                  size="sm"
                 >
-                  {t === "contacts"
-                    ? "Contacts"
-                    : t === "groups"
-                    ? "Groups"
-                    : "Threads"}
-                </Button>
+                  <span className="lock-account-label">{a.label || a.e164 || `…${a.last4}`}</span>
+                  <span className="lock-account-meta">
+                    ••••{a.last4}
+                    {a.has_pin ? " · PIN" : ""}
+                  </span>
+                </button>
               ))}
             </div>
-
-            {navTab === "contacts" || navTab === "groups" ? (
-              <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
-                <Input
-                  value={peopleQuery}
-                  onChange={(e) => setPeopleQuery(e.target.value)}
-                  placeholder="Search people & groups"
-                  fullWidth
-                />
-                {navTab === "contacts" ? (
-                  <Button
-                    onClick={() => {
-                      setNewMessageNumber("");
-                      setNewMessageOpen(true);
-                    }}
-                    variant="secondary"
-                    size="sm"
-                    title="New message"
-                  >
-                    New
-                  </Button>
-                ) : null}
-              </div>
-            ) : (
+            <label className="field-label" htmlFor="session-pin">
+              PIN
+            </label>
             <input
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search messages…"
-                style={{
-                  marginTop: 10,
-                  width: "100%",
-                  padding: 10,
-                  borderRadius: 8,
-                  border: "1px solid #374151",
-                  background: "#111827",
-                  color: "#e5e7eb",
-                }}
-              />
+              id="session-pin"
+              type="password"
+              autoComplete="off"
+              placeholder="4–8 digits"
+              value={sessionPin}
+              onChange={(e) => setSessionPin(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && void onUnlock()}
+            />
+            <button
+              type="button"
+              className="action-btn primary"
+              disabled={rosterBusy || !unlockId}
+              onClick={() => void onUnlock()}
+            >
+              {rosterBusy ? "Unlocking…" : "Unlock"}
+            </button>
+            {unlockError && <p className="hint tight warn-text">{unlockError}</p>}
+            {session.linked_unseen.length > 0 && (
+              <p className="hint tight">
+                Linked but not in roster: {session.linked_unseen.join(", ")}. Add them in Settings
+                after unlock, or below.
+              </p>
             )}
-
-            {navTab === "contacts" ? (
-              <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
-                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  <Select
-                    value={contactsSort}
-                    onChange={(e) => setContactsSort(e.target.value as any)}
-                    options={[
-                      { value: "smart", label: "Sort: Favorites/Unread/Last (default)" },
-                      { value: "name", label: "Sort: Name A–Z" },
-                    ]}
-                    size="sm"
-                    fullWidth
-                  />
-                  <Select
-                    value={filterCategory}
-                    onChange={(e) => setFilterCategory(e.target.value)}
-                    options={[
-                      { value: "", label: "Category" },
-                      ...categories.map((c) => ({ value: c, label: c })),
-                    ]}
-                    size="sm"
-                    fullWidth
-                  />
-                  <Button
-                    onClick={() => setContactFieldOpen((v) => !v)}
-                    variant={contactFieldKey.trim() || contactFieldValue.trim() ? "secondary" : "ghost"}
-                    size="sm"
-                    title="Filter by custom field"
-                  >
-                    Field
-                    {contactFieldKey.trim() || contactFieldValue.trim()
-                      ? `: ${contactFieldKey.trim() || "Any"}${contactFieldValue.trim() ? ` contains "${contactFieldValue.trim()}"` : ""}`
-                      : ""}
-                  </Button>
-                </div>
-                {contactFieldOpen ? (
-                  <div
-                    style={{
-                      border: "1px solid #1f2937",
-                      borderRadius: 10,
-                      padding: 10,
-                      background: "#0b0d10",
-                      display: "grid",
-                      gridTemplateColumns: "1fr 1fr auto",
-                      gap: 8,
-                      alignItems: "center",
-                    }}
-                  >
-                    <Select
-                      value={contactFieldKey}
-                      onChange={(e) => setContactFieldKey(e.target.value)}
-                      options={[
-                        { value: "", label: "Any field" },
-                        ...contactFieldKeys.map((k) => ({ value: k, label: k })),
-                      ]}
-                      size="sm"
-                    />
-                    <Input
-                      value={contactFieldValue}
-                      onChange={(e) => setContactFieldValue(e.target.value)}
-                      placeholder="Value contains…"
-                      size="sm"
-                    />
-                    <Button
-                      onClick={() => {
-                        setContactFieldKey("");
-                        setContactFieldValue("");
-                        setContactFieldOpen(false);
-                      }}
-                      variant="ghost"
-                      size="sm"
-                      title="Clear field filter"
-                    >
-                      Clear
-                    </Button>
-                  </div>
-                ) : null}
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 10, fontSize: 12 }}>
-                  <Checkbox
-                    checked={filterFavoritesOnly}
-                    onChange={(e) => setFilterFavoritesOnly(e.target.checked)}
-                    label="Favorites"
-                    size="sm"
-                  />
-                  <Checkbox
-                    checked={filterUnreadOnly}
-                    onChange={(e) => setFilterUnreadOnly(e.target.checked)}
-                    label="Unread"
-                    size="sm"
-                  />
-                  <Checkbox
-                    checked={filterHasPhoto}
-                    onChange={(e) => setFilterHasPhoto(e.target.checked)}
-                    label="Has photo"
-                    size="sm"
-                  />
-                  <Checkbox
-                    checked={filterHasAppleLink}
-                    onChange={(e) => setFilterHasAppleLink(e.target.checked)}
-                    label="Apple linked"
-                    size="sm"
-                  />
-                  <Checkbox
-                    checked={filterShowMuted}
-                    onChange={(e) => setFilterShowMuted(e.target.checked)}
-                    label="Show muted"
-                    size="sm"
-                  />
-                </div>
-              </div>
-            ) : navTab === "groups" ? (
-              <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
-                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  <Select
-                    value={groupsSort}
-                    onChange={(e) => setGroupsSort(e.target.value as any)}
-                    options={[
-                      { value: "smart", label: "Sort: Favorites/Unread/Last (default)" },
-                      { value: "name", label: "Sort: Name A–Z" },
-                    ]}
-                    size="sm"
-                    fullWidth
-                  />
-                  <Select
-                    value={groupFilterCategory}
-                    onChange={(e) => setGroupFilterCategory(e.target.value)}
-                    options={[
-                      { value: "", label: "Category" },
-                      ...groupCategories.map((c) => ({ value: c, label: c })),
-                    ]}
-                    size="sm"
-                    fullWidth
-                  />
-                  <Button
-                    onClick={() => setGroupFieldOpen((v) => !v)}
-                    variant={groupFieldKey.trim() || groupFieldValue.trim() ? "secondary" : "ghost"}
-                    size="sm"
-                    title="Filter by custom field"
-                  >
-                    Field
-                    {groupFieldKey.trim() || groupFieldValue.trim()
-                      ? `: ${groupFieldKey.trim() || "Any"}${groupFieldValue.trim() ? ` contains "${groupFieldValue.trim()}"` : ""}`
-                      : ""}
-                  </Button>
-                </div>
-                {groupFieldOpen ? (
-                  <div
-                    style={{
-                      border: "1px solid #1f2937",
-                      borderRadius: 10,
-                      padding: 10,
-                      background: "#0b0d10",
-                      display: "grid",
-                      gridTemplateColumns: "1fr 1fr auto",
-                      gap: 8,
-                      alignItems: "center",
-                    }}
-                  >
-                    <Select
-                      value={groupFieldKey}
-                      onChange={(e) => setGroupFieldKey(e.target.value)}
-                      options={[
-                        { value: "", label: "Any field" },
-                        ...groupFieldKeys.map((k) => ({ value: k, label: k })),
-                      ]}
-                      size="sm"
-                    />
-                    <Input
-                      value={groupFieldValue}
-                      onChange={(e) => setGroupFieldValue(e.target.value)}
-                      placeholder="Value contains…"
-                      size="sm"
-                    />
-                    <Button
-                      onClick={() => {
-                        setGroupFieldKey("");
-                        setGroupFieldValue("");
-                        setGroupFieldOpen(false);
-                      }}
-                      variant="ghost"
-                      size="sm"
-                      title="Clear field filter"
-                    >
-                      Clear
-                    </Button>
-                  </div>
-                ) : null}
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 10, fontSize: 12 }}>
-                  <Checkbox
-                    checked={groupFilterFavoritesOnly}
-                    onChange={(e) => setGroupFilterFavoritesOnly(e.target.checked)}
-                    label="Favorites"
-                    size="sm"
-                  />
-                  <Checkbox
-                    checked={groupFilterUnreadOnly}
-                    onChange={(e) => setGroupFilterUnreadOnly(e.target.checked)}
-                    label="Unread"
-                    size="sm"
-                  />
-                  <Checkbox
-                    checked={groupFilterShowMuted}
-                    onChange={(e) => setGroupFilterShowMuted(e.target.checked)}
-                    label="Show muted"
-                    size="sm"
-                  />
-                </div>
-              </div>
-            ) : null}
-
-            {navTab === "threads" ? (
-              <>
-                <div
-                  style={{
-                    marginTop: 6,
-                    display: "grid",
-                    gridTemplateColumns: "repeat(3, 1fr)",
-                    gap: 6,
-                  }}
-                >
-                  <Input
-                    value={searchSender}
-                    onChange={(e) => setSearchSender(e.target.value)}
-                    placeholder="Sender"
-                    size="sm"
-                  />
-                  <Input
-                    value={searchAfter}
-                    onChange={(e) => setSearchAfter(e.target.value)}
-                    placeholder="After ts (ms)"
-                    size="sm"
-                  />
-                  <Input
-                    value={searchBefore}
-                    onChange={(e) => setSearchBefore(e.target.value)}
-                    placeholder="Before ts (ms)"
-                    size="sm"
-                  />
-                </div>
-            {searching ? (
-                  <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "#9ca3af" }}>
-                    <Spinner size="sm" />
-                    Searching…
-                  </div>
-            ) : null}
-            {searchResults.length > 0 ? (
-                  <div
-                    ref={searchResultsRef}
-                    style={{
-                      marginTop: 8,
-                      maxHeight: 180,
-                      overflow: "auto",
-                      border: "1px solid #1f2937",
-                      borderRadius: 8,
-                    }}
-                  >
-                    {searchResults.map((r) => {
-                      const snippet = r.snippet || "";
-                      return (
-                  <div
-                    key={r.message_id}
-                    onClick={() => openSearchResult(r)}
-                          style={{
-                            padding: 10,
-                            borderBottom: "1px solid #1f2937",
-                            cursor: "pointer",
-                          }}
-                  >
-                    <div style={{ fontSize: 12, color: "#9ca3af" }}>
-                            {getThreadName({
-                              id: r.thread_id,
-                              participants: [r.thread_id],
-                              last_message_timestamp: r.timestamp,
-                              unread_count: 0,
-                              message_count: 0,
-                            })}
-                      {" • "}
-                      {fmtTime(r.timestamp)}
-                    </div>
-                          <div style={{ fontSize: 13 }}>{snippet}</div>
-                  </div>
-                      );
-                    })}
-              </div>
-                ) : null}
-              </>
-            ) : null}
           </div>
         </div>
-
-        {/* List */}
-        <div style={{ flex: 1, overflow: "auto" }}>
-          {navTab === "contacts" ? (
-            contactsForUi.length === 0 ? (
-              <div style={{ padding: 12, color: "#9ca3af" }}>
-                Messages will appear here when someone contacts you.
-              </div>
-            ) : (
-              <>
-                <div
-                  style={{
-                    padding: "10px 12px",
-                    fontSize: 12,
-                    color: "#9ca3af",
-                  }}
-                >
-                  CONTACTS
-                </div>
-                {contactsForUi.map((c: any) => {
-                  const meta = c.meta as ContactMeta | null;
-                  const displayName = c.display_name || c.id;
-                  const icon = meta?.icon || null;
-                  const photoPath = meta?.photo_path || null;
-                  const initialsSrc = (displayName || "").trim();
-                  const initials =
-                    initialsSrc.length > 0
-                      ? initialsSrc
-                          .split(/\s+/)
-                          .slice(0, 2)
-                          .map((p) => p.slice(0, 1).toUpperCase())
-                          .join("")
-                      : c.id.slice(-4);
-                  const selected =
-                    selectedThreadId === (c.thread_id || c.id) ||
-                    selectedThreadId === c.id;
-                  const isMuted = !!meta?.muted;
-                  return (
-                    <div
-                      key={c.id}
-                      onClick={() => {
-                        if (c.thread_id) {
-                          loadThreadMessages(c.thread_id);
-                        } else {
-                          loadThreadMessages(dmNumberFromKey(c.id));
-                        }
-                      }}
-                      style={{
-                        padding: 12,
-                        borderBottom: "1px solid #1f2937",
-                        cursor: "pointer",
-                        background: selected ? "#111827" : "transparent",
-                        display: "flex",
-                        gap: 10,
-                        alignItems: "center",
-                        opacity: isMuted ? 0.65 : 1,
-                      }}
-                    >
-                      {contactPhotoUrls[c.id] ? (
-                        <img
-                          src={contactPhotoUrls[c.id]}
-                          alt={displayName}
-                          style={{
-                            width: 34,
-                            height: 34,
-                            borderRadius: 999,
-                            border: "1px solid #374151",
-                            objectFit: "cover",
-                          }}
-                        />
-                      ) : (
-                        <div
-                          style={{
-                            width: 34,
-                            height: 34,
-                            borderRadius: 999,
-                            background: "#111827",
-                            border: "1px solid #374151",
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            fontWeight: 800,
-                          }}
-                        >
-                          {icon ? icon : initials}
-                        </div>
-                      )}
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div
-                          style={{
-                            fontWeight: 700,
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                            whiteSpace: "nowrap",
-                          }}
-                        >
-                          {displayName || "Unknown"}
-                        </div>
-                        <div style={{ fontSize: 12, color: "#9ca3af" }}>
-                          {dmNumberFromKey(c.id)}
-                        </div>
-                      </div>
-                      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
-                        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                          {meta?.favorite ? (
-                            <div
-                              style={{
-                                fontSize: 12,
-                                color: "#fbbf24",
-                              }}
-                            >
-                              ★
-                            </div>
-                          ) : null}
-                          {c.unread_count > 0 ? (
-                            <div
-                              style={{
-                                fontSize: 12,
-                                padding: "2px 8px",
-                                borderRadius: 999,
-                                background: "#1f2937",
-                                color: "#e5e7eb",
-                              }}
-                            >
-                              {c.unread_count}
-                            </div>
-                          ) : null}
-                        </div>
-                        <div style={{ fontSize: 11, color: "#6b7280" }}>
-                          {c.last_message_ts ? fmtTime(c.last_message_ts) : ""}
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </>
-            )
-          ) : navTab === "groups" ? (
-            groupsDerived.length === 0 ? (
-              <div style={{ padding: 12, color: "#9ca3af" }}>
-                You’re not part of any group conversations yet.
-              </div>
-            ) : (
-              <>
-                <div
-                  style={{
-                    padding: "10px 12px",
-                    fontSize: 12,
-                    color: "#9ca3af",
-                  }}
-                >
-                  GROUPS
-                </div>
-                {groupsDerived.map((g) => {
-                  const selected = selectedThreadId === g.id;
-                  return (
-                    <div
-                      key={g.id}
-                      onClick={() => loadThreadMessages(g.id)}
-                      style={{
-                        padding: 12,
-                        borderBottom: "1px solid #1f2937",
-                        cursor: "pointer",
-                        background: selected ? "#111827" : "transparent",
-                        display: "flex",
-                        gap: 10,
-                        alignItems: "center",
-                      }}
-                    >
-                      <div
-                        style={{
-                          width: 34,
-                          height: 34,
-                          borderRadius: 10,
-                          background: "#111827",
-                          border: "1px solid #374151",
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          fontWeight: 800,
-                        }}
-                      >
-                        {g.icon ? g.icon : "👥"}
-                      </div>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div
-                          style={{
-                            fontWeight: 700,
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                            whiteSpace: "nowrap",
-                          }}
-                        >
-                          {g.name}
-                        </div>
-                        <div style={{ fontSize: 12, color: "#9ca3af" }}>
-                          {g.members} members
-                        </div>
-                      </div>
-                      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
-                        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                          {g.meta?.favorite ? (
-                            <div style={{ fontSize: 12, color: "#fbbf24" }}>★</div>
-                          ) : null}
-                          {g.unread_count > 0 ? (
-                            <div
-                              style={{
-                                fontSize: 12,
-                                padding: "2px 8px",
-                                borderRadius: 999,
-                                background: "#1f2937",
-                                color: "#e5e7eb",
-                              }}
-                            >
-                              {g.unread_count}
-                            </div>
-                          ) : null}
-                        </div>
-                        <div style={{ fontSize: 11, color: "#6b7280" }}>
-                          {g.last_message_ts ? fmtTime(g.last_message_ts) : ""}
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </>
-            )
-          ) : // Threads tab (legacy)
-          threads.length === 0 ? (
-            <div style={{ padding: 12, color: "#9ca3af" }}>No threads.</div>
-          ) : (
-            threads.map((t) => (
-              <div
-                key={t.id}
-                onClick={() => loadThreadMessages(t.id)}
-                style={{
-                  padding: 12,
-                  borderBottom: "1px solid #1f2937",
-                  cursor: "pointer",
-                  background:
-                    selectedThreadId === t.id ? "#111827" : "transparent",
-                }}
-              >
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    gap: 8,
-                  }}
-                >
-                  <div
-                    style={{
-                      fontWeight: 600,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    {getThreadName(t)}
-                  </div>
-                  <div style={{ display: "flex", gap: 6 }}>
-                  {t.unread_count > 0 ? (
-                      <div
-                        style={{
-                          fontSize: 12,
-                          padding: "2px 8px",
-                          borderRadius: 999,
-                          background: "#1f2937",
-                          color: "#e5e7eb",
-                        }}
-                      >
-                      {t.unread_count}
-                    </div>
-                  ) : null}
-                </div>
-                </div>
-                <div
-                  style={{
-                    marginTop: 4,
-                    fontSize: 12,
-                    color: "#9ca3af",
-                    display: "flex",
-                    justifyContent: "space-between",
-                  }}
-                >
-                  <span>{fmtTime(t.last_message_timestamp)}</span>
-                  <span>{t.message_count} msg</span>
-                </div>
-              </div>
-            ))
-          )}
-        </div>
-
-        {/* Aliases (collapsible) */}
-        <div style={{ borderTop: "1px solid #1f2937", padding: 12 }}>
+      )}
+      <aside className="rail">
+        <div className="account-switch">
           <button
-            onClick={() => setAliasesOpen((v) => !v)}
-            style={{
-              width: "100%",
-              textAlign: "left",
-              border: "none",
-              background: "transparent",
-              color: "#e5e7eb",
-              cursor: "pointer",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              padding: 0,
-              marginBottom: aliasesOpen ? 8 : 0,
-            }}
+            type="button"
+            className="nav-btn"
+            data-label={`${session?.locked ? "Locked — click to unlock" : accountNumber ?? "Not configured"} · ${healthLabel(health)}`}
+            aria-label="Switch account"
+            aria-expanded={accountMenuOpen}
+            onClick={() => setAccountMenuOpen((o) => !o)}
           >
-            <span style={{ fontWeight: 800 }}>Aliases</span>
-            <span style={{ fontSize: 12, color: "#9ca3af" }}>
-              {aliasesOpen ? "Hide" : "Show"}
+            <span className="nav-btn-label">
+              <span className="nav-ico" aria-hidden>
+                <IconAccount />
+              </span>
             </span>
           </button>
-
-          {aliasesOpen ? (
-            <>
-          <div style={{ display: "flex", gap: 8 }}>
-            <Input
-              value={aliasNumber}
-              onChange={(e) => setAliasNumber(e.target.value)}
-              placeholder="+1202…"
-              fullWidth
-            />
-            <Input
-              value={aliasValue}
-              onChange={(e) => setAliasValue(e.target.value)}
-              placeholder="Alias"
-              fullWidth
-            />
-            <Button
-              onClick={setAlias}
-              variant="secondary"
-              size="sm"
-            >
-              Set
-            </Button>
-          </div>
-              <div
-                style={{
-                  marginTop: 8,
-                  maxHeight: 110,
-                  overflow: "auto",
-                  border: "1px solid #1f2937",
-                  borderRadius: 8,
+          {accountMenuOpen && (
+            <div className="account-menu" role="menu">
+              <button
+                type="button"
+                className="danger"
+                role="menuitem"
+                onClick={() => {
+                  setAccountMenuOpen(false);
+                  void onLock();
                 }}
               >
-            {Object.keys(aliases).length === 0 ? (
-                  <div style={{ padding: 10, color: "#9ca3af", fontSize: 12 }}>
-                    No aliases yet.
-                  </div>
-            ) : (
-              Object.entries(aliases).map(([num, al]) => (
-                    <div
-                      key={num}
-                      style={{
-                        padding: 10,
-                        borderBottom: "1px solid #1f2937",
-                        fontSize: 12,
-                      }}
-                    >
-                  <div style={{ color: "#9ca3af" }}>{num}</div>
-                  <div>{al}</div>
-                </div>
-              ))
-            )}
-          </div>
-            </>
-          ) : null}
-        </div>
-      </div>
-      {/* Sidebar resizer */}
-      <div
-        onMouseDown={() => setDragging("sidebar")}
-        style={{
-          width: 6,
-          cursor: "col-resize",
-          background: dragging === "sidebar" ? "#1f2937" : "transparent",
-        }}
-      />
-
-      {/* Main */}
-      <div
-        style={{
-          flex: 1,
-          minWidth: 400,
-          display: "flex",
-          flexDirection: "column",
-        }}
-      >
-        {/* Header */}
-        <div
-          style={{
-            padding: 12,
-            borderBottom: "1px solid #1f2937",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 12,
-          }}
-        >
-          <div>
-            <div style={{ fontWeight: 700 }}>
-              {selectedThread
-                ? getThreadName(selectedThread)
-                : "Select a thread"}
+                Lock session
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setAccountMenuOpen(false);
+                  void onLock();
+                }}
+              >
+                Switch account…
+              </button>
             </div>
-            {/* Thread IDs are an implementation detail; keep hidden in the primary UI */}
-            {selectedThreadId && pendingReplies.length > 0 ? (
-              <div
-                style={{
-                  marginTop: 4,
-                  fontSize: 12,
-                  color: "#10b981",
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 6,
-                }}
-              >
-                <span
-                  style={{
-                    padding: "2px 8px",
-                    borderRadius: 999,
-                    background: "#064e3b",
-                    color: "#d1fae5",
-                    fontWeight: 600,
-                  }}
-                >
-                  {pendingReplies.length} draft
-                  {pendingReplies.length === 1 ? "" : "s"}
-                </span>
-                <span>Agent prepared replies available</span>
-            </div>
-            ) : null}
-            {selectedThreadId && failedOutboxForSelected.length > 0 ? (
-              <div
-                style={{
-                  marginTop: 6,
-                  fontSize: 12,
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 8,
-                }}
-              >
-                <span
-                  style={{
-                    padding: "2px 8px",
-                    borderRadius: 999,
-                    background: "#7f1d1d",
-                    color: "#fee2e2",
-                    fontWeight: 700,
-                  }}
-                >
-                  Send failed
-                </span>
-                <button
-                  onClick={() => retryFailedForSelected()}
-                  style={{
-                    padding: "4px 8px",
-                    borderRadius: 8,
-                    border: "1px solid #7f1d1d",
-                    background: "#111827",
-                    color: "#fee2e2",
-                    cursor: "pointer",
-                    fontSize: 12,
-                    fontWeight: 700,
-                  }}
-                >
-                  Retry
-                </button>
-              </div>
-            ) : null}
-          </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <button
-              onClick={() => refreshThreads()}
-              style={{
-                padding: "8px 10px",
-                borderRadius: 8,
-                border: "1px solid #374151",
-                background: "#111827",
-                color: "#e5e7eb",
-                cursor: "pointer",
-              }}
-            >
-              Refresh
-            </button>
-            <button
-              onClick={() => {
-                setSettingsOpen(true);
-                // default to current contact if contact is selected
-                if (selectedThreadId) {
-                  if (selectedThreadId.startsWith("group:")) {
-                    setSettingsGroupId(selectedThreadId);
-                    setSettingsContactId(null);
-                  } else {
-                    setSettingsContactId(toContactKey(selectedThreadId));
-                    setSettingsGroupId(null);
-                  }
-                }
-              }}
-              style={{
-                padding: "8px 10px",
-                borderRadius: 8,
-                border: "1px solid #374151",
-                background: "#0b0d10",
-                color: "#9ca3af",
-                cursor: "pointer",
-                fontSize: 12,
-              }}
-              title="Settings"
-            >
-              ⚙
-            </button>
-            <button
-              onClick={() => setToolsOpen((v) => !v)}
-              style={{
-                padding: "8px 10px",
-                borderRadius: 8,
-                border: "1px solid #374151",
-                background: toolsOpen ? "#111827" : "#0b0d10",
-                color: "#e5e7eb",
-                cursor: "pointer",
-                fontSize: 12,
-              }}
-              title="Toggle Tools"
-            >
-              Tools
-            </button>
-            {/* Step 4: diagnostics/debug hidden; "More" menu returns in Step 5 (Developer Mode) */}
-            {selectedThreadId ? (
-              <div style={{ position: "relative" }}>
-                <Button
-                  onClick={() => setExportMenuOpen((v) => !v)}
-                  disabled={exporting}
-                  variant="secondary"
-                  size="sm"
-                  loading={exporting}
-                  style={{
-                    border: "1px solid #374151",
-                    background: exporting ? "#374151" : "#111827",
-                    color: "#e5e7eb",
-                    cursor: exporting ? "not-allowed" : "pointer",
-                    fontSize: 12,
-                  }}
-                  title="Export thread"
-                >
-                  {exporting ? "Exporting…" : "Export"}
-                </Button>
-                {exportMenuOpen ? (
-                  <div
-                    style={{
-                      position: "absolute",
-                      top: "105%",
-                      right: 0,
-                      background: "#0b0d10",
-                      border: "1px solid #1f2937",
-                      borderRadius: 8,
-                      minWidth: 160,
-                      boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
-                      zIndex: 10,
-                      overflow: "hidden",
-                    }}
-                  >
-                    <Button
-                      onClick={() => exportThread("txt")}
-                      disabled={exporting}
-                      variant="ghost"
-                      fullWidth
-                      style={{ textAlign: "left", justifyContent: "flex-start" }}
-                    >
-                      Text (.txt)
-                    </Button>
-                <Button
-                  onClick={() => exportThread("json")}
-                  disabled={exporting}
-                  variant="ghost"
-                  fullWidth
-                  style={{ textAlign: "left", justifyContent: "flex-start" }}
-                >
-                  JSON (.json)
-                </Button>
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-          </div>
-        </div>
-
-        {/* Conversation + Tools */}
-        <div
-          id="main-content"
-          tabIndex={-1}
-          style={{ flex: 1, display: "flex", minHeight: 0 }}
-        >
-          <div
-            style={{ flex: 1, overflow: "auto", padding: 16, minWidth: 420 }}
-          >
-            {draftHistory.length > 0 ? (
-              <div
-                style={{
-                  marginBottom: 12,
-                  display: "flex",
-                  gap: 8,
-                  alignItems: "center",
-                  flexWrap: "wrap",
-                }}
-              >
-                <div style={{ fontSize: 12, color: "#9ca3af" }}>
-                  Draft history
-                </div>
-                <Button
-                  onClick={() => {
-                    const last = draftHistory[draftHistory.length - 1];
-                    if (last) {
-                      setComposerText(last.draft);
-                      setShowWelcome(false);
-                    }
-                  }}
-                  variant="secondary"
-                  size="sm"
-                >
-                  Restore last draft
-                </Button>
-              </div>
-            ) : null}
-            {/* Outbox items are handled via the minimal header indicator (failed only). */}
-            {selectedThreadId && pendingReplies.length > 0 ? (
-              <div
-                style={{
-                  marginBottom: 12,
-                  padding: 12,
-                  borderRadius: 10,
-                  border: "1px solid #1f2937",
-                  background: "#0f172a",
-                }}
-              >
-                <div
-                  style={{
-                    fontWeight: 700,
-                    marginBottom: 6,
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                    color: "#d1fae5",
-                  }}
-                >
-                  <span>Agent drafts</span>
-                  <span style={{ fontSize: 12, color: "#9ca3af" }}>
-                    {pendingReplies.length} ready
-                  </span>
-                </div>
-                <div
-                  style={{ display: "flex", flexDirection: "column", gap: 8 }}
-                >
-                  {pendingReplies.map((p) => (
-                    <div
-                      key={p.message_id}
-                      style={{
-                        padding: 10,
-                        borderRadius: 8,
-                        border: "1px solid #1f2937",
-                        background: "#111827",
-                      }}
-                    >
-                      <div
-                        style={{
-                          fontSize: 12,
-                          color: "#9ca3af",
-                          marginBottom: 6,
-                          display: "flex",
-                          justifyContent: "space-between",
-                          alignItems: "center",
-                          gap: 8,
-                        }}
-                      >
-                        <span>
-                          {fmtTime(p.created_at)} • {p.intent}
-                        </span>
-                        <div style={{ display: "flex", gap: 6 }}>
-                          <button
-                            onClick={() => useDraft(p)}
-                            style={{
-                              padding: "6px 10px",
-                              borderRadius: 8,
-                              border: "1px solid #10b981",
-                              background: "#064e3b",
-                              color: "#d1fae5",
-                              cursor: "pointer",
-                              fontSize: 12,
-                            }}
-                          >
-                            Use Draft
-                          </button>
-                          <button
-                            onClick={async () => {
-                              await useAndSendDraft(p);
-                            }}
-                            style={{
-                              padding: "6px 10px",
-                              borderRadius: 8,
-                              border: "1px solid #14b8a6",
-                              background: "#0d9488",
-                              color: "#ecfeff",
-                              cursor: "pointer",
-                              fontSize: 12,
-                            }}
-                          >
-                            Use + Send
-                          </button>
-                          <button
-                            onClick={() => dismissDraft(p.message_id)}
-                            style={{
-                              padding: "6px 10px",
-                              borderRadius: 8,
-                              border: "1px solid #374151",
-                              background: "#1f2937",
-                              color: "#e5e7eb",
-                              cursor: "pointer",
-                              fontSize: 12,
-                            }}
-                          >
-                            Dismiss
-                          </button>
-                        </div>
-                      </div>
-                      <div style={{ whiteSpace: "pre-wrap" }}>{p.draft}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : null}
-          {selectedThreadId === null ? (
-              <div style={{ color: "#9ca3af" }}>
-                Choose a thread from the left.
-              </div>
-          ) : messages.length === 0 ? (
-              <div style={{ color: "#9ca3af" }}>
-                No messages in this thread.
-              </div>
-          ) : (
-            messages.map((m) => {
-              const from = aliases[m.sender] || m.sender;
-              const outgoing = m.direction === "Outgoing";
-              return (
-                <div
-                    id={`msg-${m.id}`}
-                  key={m.id}
-                  style={{
-                    maxWidth: "78%",
-                    marginLeft: outgoing ? "auto" : 0,
-                    marginBottom: 12,
-                    padding: 12,
-                    borderRadius: 10,
-                    background: outgoing ? "#111827" : "#1f2937",
-                    border: "1px solid #374151",
-                  }}
-                >
-                    <div
-                      style={{
-                        fontSize: 12,
-                        color: "#9ca3af",
-                        marginBottom: 6,
-                      }}
-                    >
-                    {from} • {fmtTime(m.timestamp)}
-                  </div>
-                  <div style={{ whiteSpace: "pre-wrap" }}>{m.content}</div>
-                </div>
-              );
-            })
           )}
-          </div>
-
-          {toolsOpen ? (
-            <>
-              <div
-                onMouseDown={() => setDragging("tools")}
-                style={{
-                  width: 6,
-                  cursor: "col-resize",
-                  background: dragging === "tools" ? "#1f2937" : "transparent",
-                }}
-              />
-              <div
-                style={{
-                  width: toolsWidth,
-                  minWidth: 320,
-                  maxWidth: 520,
-                  borderLeft: "1px solid #1f2937",
-                  padding: 12,
-                  overflow: "auto",
-                }}
-              >
-                {fe("ui.panel.tools", true) ? (<ToolsPanel
-                  visible={true}
-                  selectedThreadId={selectedThreadId}
-                  pendingReplies={pendingReplies}
-                  messages={messages as any}
-                  aiIntent={aiIntent}
-                  setAiIntent={setAiIntent}
-                  aiConstraints={aiConstraints}
-                  setAiConstraints={setAiConstraints}
-                  aiOutput={aiOutput}
-                  onSummarize={aiSummarize}
-                  onDraft={aiDraft}
-                  onExport={(format) => exportThread(format)}
-                  exportResult={exportResult}
-                  onOpenExportFolder={(path) => openExportFolder(path)}
-                  receiveLoopState={receiveState}
-                  agentEnabled={false}
-                  onOpenDiagnostics={() => {}}
-                  onJumpToMessage={(messageId) => {
-                    const el = document.getElementById(`msg-${messageId}`);
-                    if (el)
-                      el.scrollIntoView({
-                        behavior: "smooth",
-                        block: "center",
-                      });
-                  }}
-                />) : null}
-              </div>
-            </>
-          ) : null}
         </div>
 
-        {/* Composer + AI */}
-        <div
-          id="message-composer"
-          tabIndex={-1}
-          style={{
-            borderTop: "1px solid #1f2937",
-            padding: 12,
-            display: "flex",
-            flexDirection: "column",
-            gap: 10,
-          }}
-        >
-          <div style={{ display: "flex", gap: 8 }}>
-            <Input
-              value={composerText}
-              onChange={(e) => setComposerText(e.target.value)}
-              placeholder="Type message…"
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  sendMessage();
-                }
+        <div className="rail-search-wrap">
+          <button
+            type="button"
+            className={searchOpen || panel === "search" ? "nav-btn active" : "nav-btn"}
+            data-label="Search"
+            aria-label="Search"
+            onClick={() => {
+              setSearchOpen(true);
+              requestAnimationFrame(() => searchInputRef.current?.focus());
+            }}
+          >
+            <span className="nav-btn-label">
+              <span className="nav-ico" aria-hidden>
+                <IconSearch />
+              </span>
+            </span>
+          </button>
+          {(searchOpen || panel === "search") && (
+            <form
+              className="rail-search-pop"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (!searchQ.trim()) return;
+                setPanel("search");
+                void onSearch();
               }}
-              fullWidth
-            />
-            <Button
-              onClick={sendMessage}
-              disabled={!selectedThreadId || sending || !composerText.trim()}
-              variant="primary"
-              loading={sending}
             >
-              {sending ? "Sending…" : "Send"}
-            </Button>
-          </div>
+              <IconSearch className="rail-search-ico" />
+              <input
+                ref={searchInputRef}
+                value={searchQ}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setSearchQ(v);
+                  if (v.trim()) setPanel("search");
+                }}
+                onBlur={() => {
+                  if (!searchQ.trim() && panel !== "search") setSearchOpen(false);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") {
+                    setSearchOpen(false);
+                    (e.target as HTMLInputElement).blur();
+                  }
+                }}
+                placeholder="Search"
+                aria-label="Search Messages, People, Catalog, and Orders"
+              />
+              {searchQ && (
+                <button
+                  type="button"
+                  className="icon-btn tiny"
+                  onClick={() => setSearchQ("")}
+                  aria-label="Clear search"
+                >
+                  <IconX />
+                </button>
+              )}
+            </form>
+          )}
         </div>
-          </div>
 
-      {/* Step 4: diagnostics/debug hidden; modal returns in Step 5 (Developer Mode) */}
-      {fe("ui.modal.settings", true) ? (<SettingsModal
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        contacts={contactsMerged
-          .map((c: any) => {
-            const meta = c.meta as ContactMeta | undefined;
-            const display =
-              meta?.display_name ||
-              meta?.alias ||
-              aliases[c.id] ||
-              c.alias ||
-              c.id;
-            return {
-              id: c.id,
-              display_name: display,
-              number: dmNumberFromKey(c.id),
-              unread_count: c.unread_count,
-              last_message_ts: c.last_message_ts,
-              meta: meta || null,
-            };
-          })
-          .sort((a, b) => (b.last_message_ts || 0) - (a.last_message_ts || 0))}
-        groups={groupsDerived
-          .map((g: any) => {
-            const meta = groupMeta[g.id] as GroupMeta | undefined;
-            const display =
-              meta?.display_name ||
-              meta?.icon ||
-              aliases[g.id] ||
-              g.name ||
-              "Group chat";
-            // Try to find members from threads list
-            const t = threads.find((tt) => tt.id === g.id);
-            const members = (t?.participants || []).slice();
-            return {
-              id: g.id,
-              display_name: display,
-              members,
-              unread_count: g.unread_count,
-              last_message_ts: g.last_message_ts,
-              meta: meta || null,
-            };
-          })
-          .sort((a, b) => (b.last_message_ts || 0) - (a.last_message_ts || 0))}
-        categories={categories}
-        groupCategories={groupCategories}
-        selectedContactId={settingsContactId}
-        onSelectContact={(id) => setSettingsContactId(id)}
-        selectedGroupId={settingsGroupId}
-        onSelectGroup={(id) => setSettingsGroupId(id)}
-        onCreateContact={async (id) => {
-          const key = toContactKey(id);
-          const num = dmNumberFromKey(key);
-          await createContact(key);
-          await loadThreadMessages(num);
-        }}
-        onSetMuted={async (id, muted) => {
-          await setContactMuted(id, muted);
-        }}
-        onCreateGroup={async (id) => {
-          const gid = id.trim();
-          await unwrap<GroupMeta>(invoke("set_group_meta", { groupId: gid, patch: {} as any }), "set_group_meta");
-          await refreshGroupMeta();
-          await refreshGroupCategories();
-        }}
-        onSetGroupMuted={async (id, muted) => {
-          await unwrap<GroupMeta>(invoke("set_group_meta", { groupId: id, patch: { muted } }), "set_group_meta");
-          await refreshGroupMeta();
-          await refreshGroupCategories();
-        }}
-        onSaveDraft={async (contactId, draft) => {
-          const patch: ContactMetaPatch = {
-            display_name: draft.display_name.trim() ? draft.display_name.trim() : null,
-            alias: draft.alias.trim() ? draft.alias.trim() : null,
-            icon: draft.icon.trim() ? draft.icon.trim() : null,
-            categories: (draft.categories || []).map((c) => c.trim()).filter((c) => c),
-            favorite: !!draft.favorite,
-            muted: !!draft.muted,
-            apple_contact_id: draft.apple_contact_id.trim()
-              ? draft.apple_contact_id.trim()
-              : null,
-            custom_fields: (draft.custom_fields || [])
-              .filter((f: any) => String(f?.key || "").trim())
-              .map((f) => ({
-              id: String((f as any).id || ""),
-              key: (f.key || "").trim(),
-              value: String((f as any).value ?? ""),
-              type: String((f as any).type || (f as any).field_type || "text"),
-              searchable: !!(((f as any).searchable ?? (f as any).is_searchable) as any),
-            })),
-          };
-          await upsertContactMeta(contactId, patch);
-        }}
-        onDeleteMeta={async (contactId) => {
-          await deleteContactMeta(contactId);
-        }}
-        onUploadPhoto={async (contactId, bytes, ext) => {
-          await uploadContactPhoto(contactId, bytes, ext);
-          await ensureContactPhotoCached(contactId);
-        }}
-        onRemovePhoto={async (contactId) => {
-          await removeContactPhoto(contactId);
-          setPhotoUrlFor(contactId, null);
-        }}
-        onLinkAppleStub={async (contactId, appleContactId) => {
-          await linkAppleStub(contactId, appleContactId);
-        }}
-        onUnlinkAppleStub={async (contactId) => {
-          await unlinkAppleStub(contactId);
-        }}
-        onSaveGroupDraft={async (groupId, draft) => {
-          const patch: GroupMetaPatch = {
-            display_name: draft.display_name?.trim() ? draft.display_name.trim() : null,
-            icon: draft.icon?.trim() ? draft.icon.trim() : null,
-            categories: (draft.categories || []).map((c: string) => c.trim()).filter((c: string) => c),
-            favorite: !!draft.favorite,
-            muted: !!draft.muted,
-            custom_fields: (draft.custom_fields || [])
-              .filter((f: any) => String(f?.key || "").trim())
-              .map((f: any) => ({
-              id: String(f.id || ""),
-              key: (f.key || "").trim(),
-              value: String(f.value ?? ""),
-              type: String(f.type || f.field_type || "text"),
-              searchable: !!(f.searchable ?? f.is_searchable),
-            })),
-            member_notes: (draft.member_notes || []).map((s: string) => String(s)),
-          };
-          await unwrap<GroupMeta>(invoke("set_group_meta", { groupId, patch }), "set_group_meta");
-          await refreshGroupMeta();
-          await refreshGroupCategories();
-        }}
-        onDeleteGroupMeta={async (groupId) => {
-          await unwrap<boolean>(invoke("delete_group_meta", { groupId }), "delete_group_meta");
-          await refreshGroupMeta();
-          await refreshGroupCategories();
-        }}
-      />) : null}
-      <NewMessageModal
-        open={newMessageOpen}
-        value={newMessageNumber}
-        onChange={setNewMessageNumber}
-        onCancel={() => setNewMessageOpen(false)}
-        onCreate={async () => {
-          const raw = newMessageNumber.trim();
-          if (!raw) return;
-          const key = toContactKey(raw);
-          const num = dmNumberFromKey(key);
-          try {
-            await createContact(key);
-            setNewMessageOpen(false);
-            setNavTab("contacts");
-            setPeopleQuery("");
-            await loadThreadMessages(num);
-          } catch (e: any) {
-            addLog(String(e?.message || e));
-          }
-        }}
-      />
-      {showWelcome && !showLinkAccount ? (
-        <WelcomeOverlay
-          accounts={accounts}
-          selectedAccount={welcomeAccount}
-          onSelectAccount={(id) => {
-            setWelcomeAccount(id);
-            setWelcomeError(null);
+        <nav className="nav">
+          {NAV_GROUPS.map((group, gi) => (
+            <div className="nav-group" key={gi}>
+              {group.map(({ id, label, ico }) => (
+                <button
+                  key={id}
+                  type="button"
+                  className={panel === id ? "nav-btn active" : "nav-btn"}
+                  data-label={label}
+                  aria-label={label}
+                  onClick={() => {
+                    setPanel(id);
+                  }}
+                >
+                  <span className="nav-btn-label">
+                    <span className="nav-ico" aria-hidden>
+                      {ico}
+                    </span>
+                  </span>
+                  {id === "orders" && orders.length > 0 && (
+                    <span className="nav-count">{orders.length}</span>
+                  )}
+                  {id === "outbox" &&
+                    outboxSummary &&
+                    outboxSummary.queued + outboxSummary.sending + outboxSummary.failed > 0 && (
+                      <span className="nav-count">
+                        {outboxSummary.failed > 0
+                          ? outboxSummary.failed
+                          : outboxSummary.queued + outboxSummary.sending}
+                      </span>
+                    )}
+                </button>
+              ))}
+            </div>
+          ))}
+        </nav>
+
+        <div className="rail-foot">
+          {status && (
+            <button
+              type="button"
+              className="nav-btn"
+              data-label="Dismiss"
+              aria-label="Dismiss message"
+              title={status}
+              onClick={() => setStatus(null)}
+            >
+              <span className="nav-btn-label">
+                <span className="nav-ico" aria-hidden>
+                  <IconX />
+                </span>
+              </span>
+            </button>
+          )}
+          <button
+            type="button"
+            className="nav-btn"
+            data-label="Export chat"
+            aria-label="Export chat"
+            onClick={() => void api.exportAccount("json").then((r) => setStatus(errMsg(r) || "Chat export complete"))}
+          >
+            <span className="nav-btn-label">
+              <span className="nav-ico" aria-hidden>
+                <IconExport />
+              </span>
+            </span>
+          </button>
+        </div>
+      </aside>
+
+      {panel === "threads" && (
+        <ThreadList
+          threads={threads}
+          filteredThreads={filteredThreads}
+          selectedId={selectedId}
+          contacts={contacts}
+          groups={groups}
+          customers={customers}
+          filter={threadFilter}
+          onFilterChange={setThreadFilter}
+          newDmOpen={newDmOpen}
+          onToggleNewDm={() => setNewDmOpen((v) => !v)}
+          newDmPhone={newDmPhone}
+          onNewDmPhoneChange={(value) => {
+            setNewDmPhone(value);
+            setNewDmError(null);
           }}
-          error={welcomeError}
-          onEnter={async () => {
-            if (!welcomeAccount) return;
-            try {
-              await unwrap<boolean>(
-                invoke("set_active_account", { accountId: welcomeAccount }),
-                "set_active_account"
-              );
-              setActiveAccount(welcomeAccount);
-              setShowWelcome(false);
-              addLog(`Activated account ${welcomeAccount} from welcome`);
-              
-              // Start onboarding tour after welcome
-              if (isOnboardingActive) {
-                onboardingNextStep(); // Move from account-select to next step
-              }
-              
-              await refreshThreads();
-              await refreshAliases();
-              await refreshContactMeta();
-              await refreshCategories();
-              await refreshDiagnostics();
-              await refreshReceiveLoopState();
-            } catch (e: any) {
-              const msg = String(e?.message || e);
-              setWelcomeError(msg);
-              addLog(msg);
+          newDmError={newDmError}
+          onStartNewDm={() => void openNewDm()}
+          onSelectThread={(id) => {
+            setSelectedId(id);
+            setPanel("threads");
+          }}
+          onThreadContextMenu={(e, id) => {
+            const items = getThreadContextMenu(id);
+            const menu = getMenuByObjectType("thread");
+            contextMenu.openContextMenu(
+              e,
+              [...items, { id: "divider", label: "", action: () => {}, divider: true }],
+              id,
+            );
+            if (menu) {
+              setEditingMenu(menu.id);
             }
           }}
         />
-        ) : null}
-      
-      {/* Toast Notifications */}
-      <ToastContainer toasts={toasts} onDismiss={dismissToast} />
-      
-      {/* Onboarding Tour */}
-      <OnboardingTour />
-      
-      {/* Outbox Status - Real-time message queue feedback */}
-      <FeatureHint
-        id="outbox-status"
-        title="📤 Message Status"
-        description="Watch your messages here! See when they're queued, sending, or sent successfully."
-        position="left"
-        delay={2000}
+      )}
+
+      <SearchOverlay
+        isOpen={panel === "search"}
+        query={searchLiveQ}
+        onQueryChange={setSearchLiveQ}
+        onClose={() => setPanel("threads")}
       >
-        <OutboxStatus show={true} />
-      </FeatureHint>
-      <LinkAccountModal 
-        open={showLinkAccount}
-        onClose={() => setShowLinkAccount(false)}
-        onSuccess={async () => {
-          // Refresh accounts after successful linking
-          if (tauriAvailable) {
-            try {
-              const accts = await invoke<string[]>("get_accounts");
-              setAccounts(accts);
-              if (accts.length > 0) {
-                setWelcomeAccount(accts[0]);
+        <SearchScreen
+          query={searchLiveQ}
+          scope={searchScope}
+          onTabClick={openSearchScope}
+          people={searchPeopleHits}
+          products={searchProductHits}
+          orders={searchOrderHits}
+          messages={searchMessageHits}
+          counts={{
+            messages: searchMessageHits.length,
+            people: searchPeopleHits.length,
+            catalog: searchProductHits.length,
+            orders: searchOrderHits.length,
+          }}
+          money={money}
+          fmtTime={fmtTime}
+          initials={initials}
+          avatarTint={avatarTint}
+          productPriceLabel={productPriceLabel}
+          onOpenMessage={(threadId) => {
+            setSelectedId(threadId);
+            setPanel("threads");
+          }}
+          onOpenPerson={(key) => {
+            setPeopleKey(key);
+            setPanel("people");
+          }}
+          onOpenProduct={(id) => {
+            const p = products.find((x) => x.id === id);
+            setCatalogProductId(id);
+            setCatalogSearchQuery(p?.name ?? searchQ);
+            setCatalogSearchTick((n) => n + 1);
+            setPanel("catalog");
+          }}
+          onOpenOrder={(id) => {
+            const o = orders.find((x) => x.id === id);
+            if (o) setSelectedId(o.thread_id);
+            setFocusOrderId(id);
+            setOrderFilter({ ...EMPTY_ORDER_FILTER });
+            setPanel("orders");
+          }}
+        />
+      </SearchOverlay>
+
+      {panel === "people" && (
+          <PeopleScreen
+            topNotice={
+              <PageNoticeBar
+                card={
+                  peopleDashboard(directory, money, {
+                    openPerson: (key) => setPeopleKey(key),
+                    openChat: (threadId) => {
+                      setSelectedId(threadId);
+                      setPanel("threads");
+                    },
+                    goAddPerson: () => {},
+                    goHaventHeardList: () => {},
+                  }).cards[0]
+                }
+              />
+            }
+            contacts={contacts}
+            groups={groups}
+            customers={customers}
+            threads={threads}
+            orders={orders}
+            selectedKey={peopleKey}
+            onSelectKey={setPeopleKey}
+            onOpenChat={(threadId) => {
+              setSelectedId(threadId);
+              setPanel("threads");
+            }}
+            onNavigate={(target) => {
+              if (target === "orders" && peopleKey) {
+                const person = contacts.find((c) => c.contact_id === peopleKey);
+                const group = groups.find((g) => g.group_id === peopleKey);
+                setSelectedId(person?.contact_id ?? group?.group_id ?? peopleKey);
+                setOrderFilter((f) => ({ ...f, thisThread: true }));
               }
-            } catch (err) {
-              console.error('Failed to refresh accounts:', err);
+              setPanel(target);
+            }}
+            onRefresh={() => void refreshMeta()}
+            setStatus={setStatus}
+            money={money}
+            fmtTime={fmtTime}
+            initials={initials}
+            avatarTint={avatarTint}
+            contactForm={contactForm}
+            setContactForm={setContactForm}
+            addContact={addContact}
+            groupForm={groupForm}
+            setGroupForm={setGroupForm}
+            createGroup={createGroup}
+            searchQuery={peopleSearchQuery}
+            searchQueryTick={peopleSearchTick}
+          />
+      )}
+
+      {(panel === "catalog" || panel === "products") && (
+        <CatalogScreen
+          topNotice={
+            <PageNoticeBar
+              card={
+                catalogDashboard(products, orders, {
+                  openProduct: (id) => setCatalogProductId(id),
+                  goAddProduct: () => {},
+                  goLowStockList: () => {},
+                }).cards[0]
+              }
+            />
+          }
+          products={products}
+          selectedId={catalogProductId}
+          onSelectId={setCatalogProductId}
+          catalogSearchQuery={catalogSearchQuery}
+          catalogSearchTick={catalogSearchTick}
+          people={directory}
+          orders={orders}
+          messages={messageCorpus}
+          productImages={productImages}
+          productPriceLabel={productPriceLabel}
+          productStockLabel={productStockLabel}
+          productWeightLabel={productWeightLabel}
+          initials={initials}
+          formOpen={catalogFormOpen}
+          onNew={() => {
+            resetProductForm();
+            setCatalogFormOpen(true);
+          }}
+          onEdit={(p) => void editProduct(p)}
+          onDelete={(id) => {
+            if (catalogProductId === id) setCatalogProductId(null);
+            void removeProduct(id);
+          }}
+          onAdjustStock={(p, d) => void adjustStock(p, d)}
+          onExportCsv={() => void exportProductsCsv()}
+          onImportCsv={(file) => void importProductsCsvFile(file)}
+          form={
+            <div className="product-form">
+              <div className="form-card">
+                <h3 className="form-card-title">
+                  {productForm.id ? "Edit product" : "New product"} — Basic details
+                </h3>
+                <input
+                  placeholder="Product name"
+                  value={productForm.name}
+                  onChange={(e) => setProductForm((f) => ({ ...f, name: e.target.value }))}
+                />
+                <textarea
+                  className="product-desc"
+                  placeholder="Short description for operators and invoices (optional)"
+                  rows={2}
+                  value={productForm.description}
+                  onChange={(e) => setProductForm((f) => ({ ...f, description: e.target.value }))}
+                />
+                <input
+                  placeholder="Supplier / source (optional)"
+                  value={productForm.supplier}
+                  onChange={(e) => setProductForm((f) => ({ ...f, supplier: e.target.value }))}
+                />
+                <label
+                  className={`dropzone ${imageDragOver ? "dragover" : ""}`}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setImageDragOver(true);
+                  }}
+                  onDragLeave={() => setImageDragOver(false)}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setImageDragOver(false);
+                    const file = e.dataTransfer.files?.[0] || null;
+                    if (file && file.type.startsWith("image/")) applyProductImageFile(file);
+                  }}
+                >
+                  <IconImage />
+                  {productImagePreview ? (
+                    <>
+                      <strong>Image selected</strong>
+                      <span>Drop a new file to replace, or remove below</span>
+                    </>
+                  ) : (
+                    <>
+                      <strong>Drop product image</strong>
+                      <span>or click to browse · PNG, JPEG, WebP, GIF</span>
+                    </>
+                  )}
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp,image/gif"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0] || null;
+                      applyProductImageFile(file);
+                    }}
+                  />
+                </label>
+                {productImagePreview && (
+                  <div className="product-image-preview">
+                    <img src={productImagePreview} alt="" />
+                    <button
+                      type="button"
+                      className="ghost-btn"
+                      onClick={() => {
+                        setProductImageFile(null);
+                        setProductImagePreview(null);
+                        setClearProductImageFlag(true);
+                        if (productForm.id) {
+                          setProductImages((prev) => {
+                            const next = { ...prev };
+                            delete next[productForm.id];
+                            return next;
+                          });
+                        }
+                      }}
+                    >
+                      Remove image
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              <div className="form-card">
+                <h3 className="form-card-title">Units &amp; pricing</h3>
+                <div className="form-grid-2">
+                  <input
+                    placeholder="Sell price / base unit (USD)"
+                    value={productForm.price}
+                    onChange={(e) => setProductForm((f) => ({ ...f, price: e.target.value }))}
+                  />
+                  <input
+                    placeholder="Cost / base unit (USD)"
+                    value={productForm.cost}
+                    onChange={(e) => setProductForm((f) => ({ ...f, cost: e.target.value }))}
+                  />
+                </div>
+                <div className="form-grid-2">
+                  <select
+                    aria-label="Base unit"
+                    value={productForm.baseUnit}
+                    onChange={(e) => setProductForm((f) => ({ ...f, baseUnit: e.target.value }))}
+                  >
+                    {UNIT_OPTIONS.map((u) => (
+                      <option key={u} value={u}>
+                        Base UOM: {u}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    aria-label="Stock unit"
+                    value={productForm.stockUnit}
+                    onChange={(e) => setProductForm((f) => ({ ...f, stockUnit: e.target.value }))}
+                  >
+                    <option value="">Stock UOM: same as base</option>
+                    {UNIT_OPTIONS.map((u) => (
+                      <option key={u} value={u}>
+                        Stock UOM: {u}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    aria-label="Sales unit"
+                    value={productForm.salesUnit}
+                    onChange={(e) => setProductForm((f) => ({ ...f, salesUnit: e.target.value }))}
+                  >
+                    <option value="">Sales UOM: same as base</option>
+                    {UNIT_OPTIONS.map((u) => (
+                      <option key={u} value={u}>
+                        Sales UOM: {u}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    placeholder="Stock amount (in stock UOM)"
+                    value={productForm.stock}
+                    onChange={(e) => setProductForm((f) => ({ ...f, stock: e.target.value }))}
+                  />
+                  <input
+                    placeholder="Low-stock alert (base units, blank = off)"
+                    value={productForm.lowStockThreshold}
+                    onChange={(e) =>
+                      setProductForm((f) => ({ ...f, lowStockThreshold: e.target.value }))
+                    }
+                  />
+                </div>
+
+                <div className="pack-manager">
+                  <div className="allowlist-head">
+                    <span className="field-label">Sell packs (optional)</span>
+                    <button
+                      type="button"
+                      className="action-btn"
+                      onClick={() =>
+                        setSellPacks((rows) => [
+                          ...rows,
+                          { ...newPackRow(), unit: productForm.baseUnit || "ea" },
+                        ])
+                      }
+                    >
+                      Add pack
+                    </button>
+                  </div>
+                  {sellPacks.length === 0 ? (
+                    <p className="hint tight">
+                      e.g. Half oz @ 0.5 oz with optional custom pack price — no pipe syntax needed.
+                    </p>
+                  ) : (
+                    sellPacks.map((row) => (
+                      <div key={row.key} className="pack-row">
+                        <input
+                          placeholder="Label (e.g. Half oz)"
+                          value={row.label}
+                          onChange={(e) =>
+                            setSellPacks((rows) =>
+                              rows.map((r) =>
+                                r.key === row.key ? { ...r, label: e.target.value } : r,
+                              ),
+                            )
+                          }
+                        />
+                        <input
+                          placeholder="Qty"
+                          value={row.amount}
+                          onChange={(e) =>
+                            setSellPacks((rows) =>
+                              rows.map((r) =>
+                                r.key === row.key ? { ...r, amount: e.target.value } : r,
+                              ),
+                            )
+                          }
+                        />
+                        <select
+                          aria-label="Pack unit"
+                          value={row.unit}
+                          onChange={(e) =>
+                            setSellPacks((rows) =>
+                              rows.map((r) =>
+                                r.key === row.key ? { ...r, unit: e.target.value } : r,
+                              ),
+                            )
+                          }
+                        >
+                          {UNIT_OPTIONS.map((u) => (
+                            <option key={u} value={u}>
+                              {u}
+                            </option>
+                          ))}
+                        </select>
+                        <input
+                          placeholder="Price $"
+                          value={row.price}
+                          onChange={(e) =>
+                            setSellPacks((rows) =>
+                              rows.map((r) =>
+                                r.key === row.key ? { ...r, price: e.target.value } : r,
+                              ),
+                            )
+                          }
+                        />
+                        <button
+                          type="button"
+                          className="ghost-btn"
+                          aria-label="Remove pack"
+                          onClick={() =>
+                            setSellPacks((rows) => rows.filter((r) => r.key !== row.key))
+                          }
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              <div className="form-card">
+                <h3 className="form-card-title">Logistics &amp; SKU</h3>
+                <div className="form-grid-2">
+                  <input
+                    placeholder="SKU (optional)"
+                    value={productForm.sku}
+                    onChange={(e) => setProductForm((f) => ({ ...f, sku: e.target.value }))}
+                  />
+                  <input
+                    placeholder="Package weight (optional)"
+                    value={productForm.weight}
+                    onChange={(e) => setProductForm((f) => ({ ...f, weight: e.target.value }))}
+                  />
+                  <select
+                    aria-label="Weight unit"
+                    value={productForm.weightUnit}
+                    onChange={(e) => setProductForm((f) => ({ ...f, weightUnit: e.target.value }))}
+                    disabled={productForm.weight.trim() === "" || Number(productForm.weight) === 0}
+                  >
+                    <option value="g">Weight: g</option>
+                    <option value="kg">Weight: kg</option>
+                    <option value="oz">Weight: oz</option>
+                    <option value="lb">Weight: lb</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="product-form-actions">
+                <button type="button" className="action-btn primary" onClick={() => void saveProduct()}>
+                  {productForm.id ? "Save product" : "Add product"}
+                </button>
+                <button
+                  type="button"
+                  className="ghost-btn"
+                  onClick={() => resetProductForm()}
+                >
+                  {productForm.id ? "Cancel edit" : "Cancel"}
+                </button>
+              </div>
+            </div>
+          }
+        />
+      )}
+
+      {panel === "orders" && (
+        <OrdersScreen
+          topNotice={
+            <PageNoticeBar
+              card={
+                ordersDashboard(orders, money, {
+                  openOrder: (id) => setFocusOrderId(id),
+                  goNewOrder: () => {},
+                  goUnpaidList: () => {},
+                }).cards[0]
+              }
+            />
+          }
+          orders={orders}
+          filteredOrders={filteredOrders}
+          orderFilter={orderFilter}
+          setOrderFilter={setOrderFilter}
+          products={products}
+          selectedId={selectedId}
+          setSelectedId={setSelectedId}
+          setPanel={setPanel}
+          orderProductId={orderProductId}
+          setOrderProductId={setOrderProductId}
+          orderSellOptionId={orderSellOptionId}
+          setOrderSellOptionId={setOrderSellOptionId}
+          orderQty={orderQty}
+          setOrderQty={setOrderQty}
+          placeOrder={placeOrder}
+          sendQuote={sendQuote}
+          sendInvoice={sendInvoice}
+          confirmDraftOrder={confirmDraftOrder}
+          editDraftFirstLineQty={editDraftFirstLineQty}
+          setOrderLifecycle={setOrderLifecycle}
+          duplicateAsDraft={duplicateAsDraft}
+          focusOrderId={focusOrderId}
+          onConsumedFocus={() => setFocusOrderId(null)}
+          orderParty={orderParty}
+          threadTitle={threadTitle}
+          contacts={contacts}
+          groups={groups}
+          customers={customers}
+          money={money}
+          fmtTime={fmtTime}
+          orderStatusTone={orderStatusTone}
+          productPriceLabel={productPriceLabel}
+          productStockLabel={productStockLabel}
+          formatPhone={formatPhone}
+          initials={initials}
+          avatarTint={avatarTint}
+        />
+      )}
+
+      {panel === "sales" && (
+        <SalesScreen
+          salesSummary={salesSummary}
+          commerceAudit={commerceAudit}
+          salesRange={salesRange}
+          setSalesRange={setSalesRange}
+          salesStatus={salesStatus}
+          setSalesStatus={setSalesStatus}
+          setSalesSummary={setSalesSummary}
+          setCommerceAudit={setCommerceAudit}
+          contacts={contacts}
+          groups={groups}
+          customers={customers}
+          setStatus={setStatus}
+          setPanel={setPanel}
+          setSelectedId={setSelectedId}
+          setFocusOrderId={setFocusOrderId}
+          threadTitle={threadTitle}
+          money={money}
+          fmtTime={fmtTime}
+          orderStatusTone={orderStatusTone}
+        />
+      )}
+
+      {panel === "outbox" && (
+        <OutboxScreen
+          items={globalOutbox}
+          summary={outboxSummary}
+          contacts={contacts}
+          groups={groups}
+          customers={customers}
+          onRefresh={refreshGlobalOutbox}
+          onRetry={onRetry}
+          onDelete={onDeleteOutbox}
+          onOpenThread={(threadId) => {
+            setSelectedId(threadId);
+            setPanel("threads");
+          }}
+        />
+      )}
+
+      {panel === "audit" && (
+        <AuditScreen
+          autoReply={audit}
+          commerce={commerceAudit}
+          ivr={ivrAudit}
+          outbox={outboxAudit}
+          threadTitle={(id) => threadTitle(id, contacts, groups, customers)}
+          fmtTime={fmtTime}
+          onOpenThread={(threadId) => {
+            setSelectedId(threadId);
+            setPanel("threads");
+          }}
+        />
+      )}
+
+      {panel === "invoice-export" && (
+        <section className="thread-col wide">
+          <header className="col-head">
+            <div>
+              <div>Invoice Export</div>
+              <div className="col-head-sub">Format and send via Signal</div>
+            </div>
+          </header>
+          <InvoiceExport />
+        </section>
+      )}
+
+      {panel === "settings" && (
+        <SettingsScreen tab={settingsTab} onTabChange={setSettingsTab}>
+          {settingsTab === "account" && (
+            <AccountSettings
+              setupNeeded={setupNeeded}
+              diagnostics={diagnostics}
+              receiveLabel={healthLabel(health)}
+              ai={ai}
+              linkBusy={linkBusy}
+              linkStatus={linkStatus}
+              linkUri={linkUri}
+              linkCopied={linkCopied}
+              onStartLink={() => void startDeviceLink()}
+              onCancelLink={() => void cancelDeviceLink()}
+              onCopyLinkUri={() => void copyLinkUri()}
+              session={session}
+              onSetPin={async (accountId, currentPin, newPin) => {
+                const res = await api.setAccountPin(accountId, currentPin, newPin);
+                if (!res.success) {
+                  setStatus(res.error);
+                  return false;
+                }
+                applySession(res.data);
+                setStatus("PIN updated");
+                return true;
+              }}
+              addNumber={addNumber}
+              onAddNumberChange={setAddNumber}
+              addLabel={addLabel}
+              onAddLabelChange={setAddLabel}
+              addPin={addPin}
+              onAddPinChange={setAddPin}
+              rosterBusy={rosterBusy}
+              onAddAccount={() => void onAddAccount(addNumber, addPin, addLabel)}
+            />
+          )}
+          {settingsTab === "backup" && (
+            <BackupSettings
+              password={backupPassword}
+              onPasswordChange={setBackupPassword}
+              busy={backupBusy}
+              restartRequired={restartRequired}
+              importMode={importMode}
+              onImportModeChange={setImportMode}
+              onExportBundle={() => void onExportDataBundle()}
+              onExportChatOnly={() =>
+                void api.exportAccount("json").then((r) => {
+                  if (r.success) setStatus("Chat (messages) exported");
+                  else setStatus(r.error);
+                })
+              }
+              onImportFile={(f) => void onImportDataBundleFile(f)}
+              onQuitForRestart={() => void quitForRestart()}
+            />
+          )}
+          {settingsTab === "auto" && (
+            <AutoReplySettingsTab
+              settings={autoSettings}
+              onSave={(patch) => void saveAutoSettings(patch)}
+              onAllowCurrentChat={() => void addToAllowlist("auto", selectedId)}
+              onRemoveFromAllowlist={(tid) => void removeFromAllowlist("auto", tid)}
+              audit={audit}
+              onOpenLog={() => setPanel("audit")}
+              contacts={contacts}
+              groups={groups}
+              customers={customers}
+            />
+          )}
+          {settingsTab === "ivr" && (
+            <BuyerMenuSettings
+              settings={ivrSettings}
+              onSave={(patch) => void saveIvrSettings(patch)}
+              onAllowCurrentChat={() => void addToAllowlist("ivr", selectedId)}
+              onRemoveFromAllowlist={(tid) => void removeFromAllowlist("ivr", tid)}
+              contacts={contacts}
+              groups={groups}
+              customers={customers}
+              menus={ivrMenusDraft}
+              menusBusy={ivrMenusBusy}
+              menusError={ivrMenusError}
+              previewSteps={ivrPreviewSteps}
+              onMenusChange={setIvrMenusDraft}
+              onSaveMenus={() => void saveIvrMenusDraft()}
+              onReloadMenus={() => void loadIvrMenusEditor()}
+              onResetDemo={() => void resetIvrMenusDemo()}
+              onPreview={(inputs) => void previewIvrPath(inputs)}
+            />
+          )}
+        </SettingsScreen>
+      )}
+
+      {(panel === "audit" ||
+        panel === "people" ||
+        panel === "settings" ||
+        panel === "products" ||
+        panel === "catalog" ||
+        panel === "orders" ||
+        panel === "sales" ||
+        panel === "search" ||
+        panel === "outbox") ? null : (
+      <main className="convo">
+        {!selectedId ? (
+          <PageDashboard
+            {...homeDashboard(
+              {
+                messages: messagesDashboard(threads, outboxSummary, contacts, groups, {
+                  openThread: (id) => setSelectedId(id),
+                  goOutbox: () => setPanel("outbox"),
+                  goNewMessage: () => setNewDmOpen(true),
+                }),
+                catalog: catalogDashboard(products, orders, {
+                  openProduct: (id) => {
+                    setPanel("catalog");
+                    setCatalogProductId(id);
+                  },
+                  goAddProduct: () => setPanel("catalog"),
+                  goLowStockList: () => setPanel("catalog"),
+                }),
+                orders: ordersDashboard(orders, money, {
+                  openOrder: (id) => {
+                    setPanel("orders");
+                    setFocusOrderId(id);
+                  },
+                  goNewOrder: () => setPanel("orders"),
+                  goUnpaidList: () => setPanel("orders"),
+                }),
+                people: peopleDashboard(directory, money, {
+                  openPerson: (key) => {
+                    setPanel("people");
+                    setPeopleKey(key);
+                  },
+                  openChat: (threadId) => {
+                    setSelectedId(threadId);
+                    setPanel("threads");
+                  },
+                  goAddPerson: () => setPanel("people"),
+                  goHaventHeardList: () => setPanel("people"),
+                }),
+              },
+              {
+                goMessages: () => setPanel("threads"),
+                goCatalog: () => setPanel("catalog"),
+                goOrders: () => setPanel("orders"),
+                goPeople: () => setPanel("people"),
+              },
+              setupNeeded
+                ? [
+                    {
+                      key: "setup-link",
+                      icon: <IconLink />,
+                      kicker: "Setup needed",
+                      title: "Link this Mac",
+                      body: "Signal messages won't arrive until this Mac is linked to your phone.",
+                      primary: { label: "Link now", onClick: openDeviceLinkSetup },
+                      urgent: true,
+                    },
+                  ]
+                : [],
+            )}
+          />
+        ) : (
+          <>
+            <ConvoHeader
+              threadId={selectedId}
+              title={title}
+              threadAuto={threadAuto}
+              threadIvr={threadIvr}
+              ivrSettings={ivrSettings}
+              ivrHint={ivrHint}
+              ai={ai}
+              aiBusy={aiBusy}
+              onToggleIvr={(next) => void toggleThreadIvr(next)}
+              onResumeIvr={() => void resumeIvrBot()}
+              onToggleAuto={(next) => void toggleThreadAuto(next)}
+              onSummarize={() => void onSummarize()}
+              onDraft={() => void onDraft()}
+              onExport={() => void onExportThread()}
+            />
+
+            {summaryText && (
+              <div className="summary-box">
+                <div className="summary-head">
+                  <strong>Summary</strong>
+                  <button type="button" className="ghost-btn" onClick={() => setSummaryText(null)}>
+                    Dismiss
+                  </button>
+                </div>
+                <pre>{summaryText}</pre>
+              </div>
+            )}
+
+            <MessageList
+              threadId={selectedId}
+              messages={messages}
+              pending={globalOutbox.filter((o) => o.thread_id === selectedId)}
+              contacts={contacts}
+              groups={groups}
+              customers={customers}
+              bottomRef={bottomRef}
+              onRetry={(id) => void onRetry(id)}
+              onDiscard={(id) => void onDeleteOutbox(id)}
+            />
+
+            <Composer
+              value={composer}
+              onChange={setComposer}
+              attachFile={attachFile}
+              attachPreview={attachPreview}
+              onAttach={(file) => {
+                setAttachFile(file);
+                if (attachPreview) URL.revokeObjectURL(attachPreview);
+                setAttachPreview(file ? URL.createObjectURL(file) : null);
+              }}
+              sending={sending}
+              blocked={restartRequired}
+              onSend={() => void onSend()}
+            />
+          </>
+        )}
+      </main>
+      )}
+
+      {showProfileRail &&
+        (selectedId ? (
+          <ProfileRail
+            threadId={selectedId}
+            title={title}
+            initials={initials(title)}
+            contact={profileContact}
+            customer={profileCustomer}
+            orders={orders}
+            products={products}
+            messages={messages}
+            ai={ai}
+            aiBusy={aiBusy}
+            onStatus={setStatus}
+            onSetComposer={setComposer}
+            onDraft={(intent) => void onDraft(intent)}
+            onSummarize={onSummarize}
+            onLinkCustomer={() => void linkCustomerFromThread()}
+            onOpenOrders={() => {
+              setOrderFilter((f) => ({ ...f, thisThread: true, q: "" }));
+              setPanel("orders");
+            }}
+            onSendInvoice={(id) => void sendInvoice(id)}
+            onSendQuote={(id) => void sendQuote(id)}
+            onMarkPaid={(id) => void setOrderLifecycle(id, "paid")}
+            onToggleFavorite={(next) => {
+              void (async () => {
+                const res = isGroupThread(selectedId)
+                  ? await api.setGroupMeta(selectedId, { favorite: next })
+                  : await api.setContactMeta(selectedId, { favorite: next });
+                if (!res.success) setStatus(res.error);
+                else await refreshMeta();
+              })();
+            }}
+            onToggleMute={(next) => {
+              void (async () => {
+                const res = isGroupThread(selectedId)
+                  ? await api.setGroupMeta(selectedId, { muted: next })
+                  : await api.setContactMeta(selectedId, { muted: next });
+                if (!res.success) setStatus(res.error);
+                else await refreshMeta();
+              })();
+            }}
+            groupNotes={
+              isGroupThread(selectedId)
+                ? groups.find(
+                    (g) =>
+                      g.group_id === selectedId ||
+                      g.group_id.replace(/^group[:.]/, "") ===
+                        selectedId.replace(/^group[:.]/, ""),
+                  )?.notes ?? ""
+                : ""
+            }
+            onSaveNotes={(notes) => {
+              void (async () => {
+                if (isGroupThread(selectedId)) {
+                  const res = await api.setGroupMeta(selectedId, { notes });
+                  if (!res.success) setStatus(res.error);
+                  else {
+                    setStatus("Notes saved");
+                    await refreshMeta();
+                  }
+                  return;
+                }
+                if (!profileCustomer) {
+                  setStatus("Link as customer before saving notes");
+                  return;
+                }
+                const res = await api.upsertCustomer({
+                  ...profileCustomer,
+                  notes,
+                });
+                if (!res.success) setStatus(res.error);
+                else {
+                  setStatus("Notes saved");
+                  await refreshMeta();
+                }
+              })();
+            }}
+          />
+        ) : (
+          <aside className="profile-rail profile-rail-empty">
+            <div className="profile-rail-empty-inner">
+              <p className="profile-section-title">Context</p>
+              <p className="hint tight">Select a conversation to see standing, notes, and actions.</p>
+            </div>
+          </aside>
+        ))}
+      <ShortcutsHelp open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
+
+      <ContextMenu
+        position={contextMenu.position}
+        items={contextMenu.items}
+        onClose={contextMenu.closeContextMenu}
+        onEditMenu={() => {
+          if (editingMenu) {
+            const menu = getMenuByObjectType(
+              editingMenu.includes("thread")
+                ? "thread"
+                : editingMenu.includes("order")
+                  ? "order"
+                  : editingMenu.includes("product")
+                    ? "product"
+                    : "contact",
+            );
+            if (menu) {
+              setMenuEditorOpen(true);
             }
           }
+        }}
+      />
+
+      {menuEditorOpen && editingMenu && (
+        <MenuEditor
+          menu={getMenuByObjectType(
+            editingMenu.includes("thread")
+              ? "thread"
+              : editingMenu.includes("order")
+                ? "order"
+                : editingMenu.includes("product")
+                  ? "product"
+                  : "contact",
+          ) || { id: "", name: "", objectType: "", items: [] }}
+          onSave={(menu) => {
+            updateMenu(menu);
+            setMenuEditorOpen(false);
+            setStatus("Menu updated");
+          }}
+          onClose={() => {
+            setMenuEditorOpen(false);
+            setEditingMenu(null);
+          }}
+        />
+      )}
+      <FeedbackButton
+        onSubmit={async (feedback) => {
+          await saveFeedback({
+            timestamp: new Date().toISOString(),
+            feedback,
+            userAgent: navigator.userAgent,
+            url: window.location.href,
+          });
         }}
       />
     </div>

@@ -9,23 +9,31 @@
 
 ## Development Build
 
-Run the app in development mode:
+Open the **local desktop app** (Tauri window + Vite UI + Rust/signal-cli backend):
 
 ```bash
-npm run tauri:dev
+./run-dev.sh
+# or
+npm run desktop
+# or
+./SignalX-Dev.command
 ```
 
-Or use the launcher:
+Browser layout preview only (no Signal IPC):
+
 ```bash
-./scripts/dev/SignalX-Dev.command
+npm run ui
 ```
+
+Requires Rust **1.88+** (see repo-root `rust-toolchain.toml`). If `tauri:dev` fails with
+`edition2024` / `hashbrown` errors, run `rustup update` and ensure that toolchain is active.
 
 ## Production Build
 
 Build the production-ready app:
 
 ```bash
-npm run tauri:build
+npm run tauri build
 ```
 
 This command will:
@@ -115,7 +123,7 @@ jobs:
       - name: Install dependencies
         run: npm install
       - name: Build app
-        run: npm run tauri:build
+        run: npm run tauri build
       - name: Upload artifact
         uses: actions/upload-artifact@v3
         with:

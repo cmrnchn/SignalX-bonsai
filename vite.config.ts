@@ -1,26 +1,21 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import path from "path";
 
-export default defineConfig(({ mode }) => ({
+// https://vite.dev/config/ — tuned for Tauri v2 desktop development.
+export default defineConfig({
   plugins: [react()],
-  // Allow SIGNALX_* env vars to be exposed to the frontend via import.meta.env
-  // (keeps override frontend-only; no Rust/backend changes required).
-  envPrefix: ["VITE_", "SIGNALX_"],
-  base: mode === "development" ? "/" : "./",
-  resolve: {
-    alias: {
-      "@packages": path.resolve(__dirname, "packages"),
-    },
-  },
-  build: {
-    outDir: "dist",
-    emptyOutDir: true,
-    target: "es2019"
-  },
+  // Prevent Vite from obscuring Rust errors printed to the terminal.
+  clearScreen: false,
   server: {
-    host: "127.0.0.1",
     port: 5173,
-    strictPort: true
-  }
-}));
+    strictPort: true,
+    // All interfaces so Cursor's 127.174.* browser proxy can reach Vite
+    // (host: false binds ::1-only and times out). Tauri still uses localhost:5173.
+    host: true,
+  },
+  // Expose both VITE_ and TAURI_ env vars to the frontend.
+  envPrefix: ["VITE_", "TAURI_"],
+  build: {
+    target: "esnext",
+  },
+});

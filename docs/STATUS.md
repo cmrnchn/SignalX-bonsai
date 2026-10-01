@@ -1,142 +1,40 @@
-# SignalX Desktop - Implementation Status
+# SignalX - Status
 
-## ✅ Completed Features
+SignalX is a single-number Signal desktop client: messenger, optional local AI
+drafts / guarded auto-reply, with a Tauri + React GUI on a Rust daemon
+(`signal-cli` + optional Ollama). Local sales console: catalog, IVR menus,
+quotes/orders/invoices, inventory, and Sales summary — all outbox-gated.
 
-### 1. Enhanced Health Badge (Task A) ✅
-- **Location**: Sidebar, below "SignalX" title
-- **Features**:
-  - Green: Last success < 15 seconds
-  - Yellow: 15-60 seconds OR in cooldown
-  - Red: > 60 seconds OR consecutive failures > 0
-  - Tooltip shows: backoff_ms, error_count, last_receive_error
-- **Status**: Implemented and ready for testing
+## Current reality
 
-### 2. Production Build (Task B) ✅
-- **Command**: `npm run tauri:build`
-- **Output Location**: 
-  - App: `src-tauri/target/release/bundle/macos/SignalX.app`
-  - DMG: `src-tauri/target/release/bundle/dmg/SignalX_0.1.0_aarch64.dmg`
-- **Documentation**: See `BUILD.md`
-- **Status**: Build successful! ✅
+- **Local desktop app is the product.** `./run-dev.sh`, `./SignalX-Dev.command`, or
+  `npm run desktop` opens the Tauri window (Vite is only the UI host inside that shell).
+- **`npm run ui`** is a browser layout preview — no Signal backend / IPC.
+- Requires **Rust ≥ 1.88** (`rust-toolchain.toml` pins it). Older Cargo fails on current crates.
+- **One live Signal account** from `.signalx.env` (`SIGNALX_NUMBER` +
+  `SIGNALX_SIGNALCLI_CONFIG`). A PIN-gated roster can switch identities; only
+  one receive loop and outbox worker run. Shop data lives under
+  `accounts/{sanitized_id}/`.
+- Storage keys use a sanitized form of the number; shop files live under
+  `accounts/{id}/`. Orphan JSON under other stems is ignored, not deleted.
+- **Outbox is the only send path** (queue → retry → signal-cli).
+- Headless mode remains available: `cd src-tauri && cargo run -- --headless`
 
-### 3. Export Tools (Task C) ✅
-- **Backend**: `export_thread` command
-  - Supports TXT and JSON formats
-  - Exports to: `~/Library/Application Support/SignalX/export/`
-  - Returns file path in response
-- **Frontend**: 
-  - Export buttons in thread header (next to Refresh)
-  - Shows export result with file path
-  - "Open Folder" button opens Finder
-- **Status**: Implemented and ready for testing
+## Shipped product slices
 
-### 4. 🚀 NEW: TUI Mode Foundation (Phase 2.1 Started!) ✅
-- **Binary**: `signalx-tui` built successfully
-- **Location**: `src-tauri/src/tui/`
-- **Features Implemented**:
-  - Terminal UI with header, thread list, messages, input bar
-  - Keyboard navigation (j/k, arrows, i for compose, q to quit)
-  - Color scheme with visual feedback
-  - Input modes (Normal and Editing)
-  - Thread selection
-- **Status**: Foundation complete, ready for backend integration
-- **Build**: `cargo build --release --bin signalx-tui`
-- **Run**: `./src-tauri/target/release/signalx-tui`
+1. Menu-style IVR responder (Signal IVR)
+2. Catalog + customers
+3. Orders + invoices (GUI + IVR place-order → invoice via outbox)
+4. Operator GUI polish (Settings allowlists, order status clarity, IVR armed hints)
+5. In-app device link (Settings → Device link QR + URI; CLI scripts under `scripts/` remain fallback)
+6. Dark Bonsai shell + soft NotRegistered/setup banner + commerce/IVR AI + static copy polish
+7. Order lifecycle (paid / fulfilled / cancelled), Outbox cockpit, outbound attachments (outbox-only)
+8. Profile context rail + AI quick actions (Messages 4-column shell; orders-backed standing/ledger; suggest chips)
+9. Backup / migrate v1 (Settings → System; zip export/import of app data; restart required after import)
+10. IVR commerce editor (menus IPC + Settings JSON editor; `order_status`; hide zero-stock)
+11. Quotes / draft orders (no stock until Confirm; Send quote vs Send invoice)
+12. Inventory ops (stock adjust + ledger, low-stock threshold, CSV import/export)
+13. Sales console (Sales nav, totals/top products, commerce audit, Duplicate as draft)
+14. PIN-gated multi-account session switch (one live identity; shop data under `accounts/{id}/`)
 
-### 5. Backend Messaging ✅
-- **Headless binary**: Working perfectly
-- **Tested**: Successfully sent message to +17742083223
-- **Signal CLI Integration**: Verified and functional
-- **Status**: Production ready
-
-## 🧪 Testing Checklist
-
-### Smoke Test (5 minutes)
-1. **Launch**: Double-click `scripts/dev/SignalX-Dev.command`
-2. **Verify**:
-   - [ ] Active account loads correctly
-   - [ ] Incoming message appears (no UI freeze)
-   - [ ] Outgoing message sends successfully
-   - [ ] Restart app → history persists (disk persistence)
-
-### Health Badge Test
-1. **Check sidebar**:
-   - [ ] Health badge shows correct color based on receive state
-   - [ ] Hover tooltip shows detailed diagnostics
-   - [ ] Badge updates in real-time
-
-### Export Test
-1. **Select a thread** with messages
-2. **Click "Export TXT"**:
-   - [ ] File is created in export directory
-   - [ ] Export result shows file path
-   - [ ] "Open Folder" button works
-3. **Click "Export JSON"**:
-   - [ ] JSON file is created
-   - [ ] File contains valid JSON with all messages
-
-### Production Build Test
-1. **Launch built app**:
-   ```bash
-   open src-tauri/target/release/bundle/macos/SignalX.app
-   ```
-2. **Verify**:
-   - [ ] App launches without dev server
-   - [ ] All features work (same as dev mode)
-   - [ ] No console errors
-
-## 📝 Next Steps
-
-### Immediate
-1. **Run smoke test** (see above)
-2. **Test health badge** with real receive loop
-3. **Test export** with a thread containing messages
-4. **Launch production build** and verify it works
-
-### Optional: AI Tools
-If you want AI features:
-1. Install Ollama:
-   ```bash
-   brew install ollama
-   ollama pull qwen2.5:7b-instruct
-   ```
-2. Update `.signalx.env`:
-   ```
-   SIGNALX_OLLAMA_MODEL=qwen2.5:7b-instruct
-   ```
-3. Test:
-   - [ ] `summarize_thread` returns readable output
-   - [ ] `draft_reply` fills composer (never auto-sends)
-
-## 🐛 Known Issues
-
-None currently. All features compile and build successfully.
-
-## 📦 Build Output
-
-**Production build location**:
-```
-src-tauri/target/release/bundle/macos/SignalX.app
-```
-
-**To run**:
-```bash
-open src-tauri/target/release/bundle/macos/SignalX.app
-```
-
-Or double-click the `.app` file in Finder.
-
-## 🔧 Configuration
-
-**Environment file**: `.signalx.env`
-- `SIGNALX_SIGNALCLI_CONFIG` - Signal CLI config path
-- `SIGNALX_NUMBER` - Your Signal phone number
-- `SIGNALX_SIGNALCLI_BIN` - (Optional) Path to signal-cli binary
-- `SIGNALX_OLLAMA_MODEL` - (Optional) Ollama model for AI features
-
-## 📚 Documentation
-
-- **Build instructions**: `BUILD.md`
-- **Handoff tasks**: `HANDOFF.md`
-- **Main README**: `README.md`
-
+See `docs/NEXT_STEPS.md` for smoke checklists and the long-term backlog.

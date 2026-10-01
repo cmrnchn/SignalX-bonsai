@@ -1,11 +1,22 @@
 # SignalX Desktop - Quick Start Guide
 
+SignalX is a **local desktop app** (Tauri). The Vite URL is only a layout preview —
+messaging and Signal need the desktop window.
+
+| Mode | Command | What you get |
+|------|---------|--------------|
+| **Desktop app (real)** | `./run-dev.sh` or `./SignalX-Dev.command` or `npm run desktop` | Native window + signal-cli backend |
+| **Browser UI preview** | `npm run ui` | Layout only — no send/receive |
+| **Production .app** | `npm run desktop:build` | `SignalX.app` under `src-tauri/target/release/bundle/` |
+
+Requires **Rust 1.88+** (pinned in `rust-toolchain.toml`) and Node 18+.
+
 ## 🚀 First Time Setup
 
 ### 1. Prerequisites Check
 ```bash
 # Verify dependencies
-./scripts/testing/test-features.sh
+./scripts/test-features.sh
 ```
 
 ### 2. Configure Environment
@@ -19,41 +30,47 @@ SIGNALX_NUMBER=+1YOURNUMBERHERE
 SIGNALX_SIGNALCLI_BIN=/opt/homebrew/bin/signal-cli
 ```
 
-### 3. Launch Development Mode
+### 3. Launch the desktop app
 ```bash
 # Double-click or run:
-./scripts/dev/SignalX-Dev.command
+./SignalX-Dev.command
+# or
+./run-dev.sh
 ```
 
 ## 🧪 Testing Features
 
 ### Quick Smoke Test (5 minutes)
-1. **Launch app**: `./scripts/dev/SignalX-Dev.command`
+1. **Launch app**: `./run-dev.sh` or `./SignalX-Dev.command`
 2. **Verify**:
-   - [ ] Active account appears in dropdown
+   - [ ] Dark modular shell (rail + list + chat panels)
+   - [ ] Account number or **Link this Mac** setup banner if not registered
    - [ ] Health badge shows in sidebar (green/yellow/red)
-   - [ ] Threads list loads
+   - [ ] Threads list loads (or empty state with quick actions)
    - [ ] Can select a thread and see messages
-   - [ ] Can send a message
+   - [ ] Can send a message (outbox)
    - [ ] Incoming message appears (from another device)
+   - [ ] Settings → Device link shows QR after Start linking
+   - [ ] Draft reply fills composer only (if AI configured)
 
 ### Feature Verification
 Run the verification script:
 ```bash
-./scripts/testing/test-features.sh
+./scripts/test-features.sh
 ```
 
 ## 🤖 AI Features (Optional)
 
 ### Setup AI Tools
 ```bash
-./scripts/setup/setup-ai.sh
+./scripts/setup-ai.sh
 ```
 
 This will:
 - Install Ollama (if needed)
+- Start the Ollama HTTP server (`ollama serve`)
 - Pull a language model
-- Configure `.signalx.env`
+- Configure `.signalx.env` with `SIGNALX_OLLAMA_MODEL` and `SIGNALX_OLLAMA_URL`
 
 ### Test AI Features
 1. Select a thread with messages
@@ -64,12 +81,12 @@ This will:
 
 ### Build the App
 ```bash
-npm run tauri:build
+npm run tauri build
 ```
 
 ### Verify Build
 ```bash
-./scripts/testing/verify-build.sh
+./verify-build.sh
 ```
 
 ### Launch Production Build
@@ -95,9 +112,11 @@ open src-tauri/target/release/bundle/macos/SignalX.app
 3. Check console logs for errors
 
 ### AI Features Not Working
-1. Verify Ollama is running: `ollama list`
-2. Check `.signalx.env` has `SIGNALX_OLLAMA_MODEL` set
-3. Test Ollama directly: `ollama run qwen2.5:7b-instruct "test"`
+1. Verify Ollama server is running: `ollama serve` (in a separate terminal)
+2. Check HTTP API: `curl -s http://localhost:11434/api/tags`
+3. Check `.signalx.env` has `SIGNALX_OLLAMA_MODEL` set
+4. In the app Diagnostics panel, confirm `ollama_reachable: true`
+5. List pulled models: `ollama list`
 
 ## 📁 Important Directories
 
@@ -105,7 +124,7 @@ open src-tauri/target/release/bundle/macos/SignalX.app
   - `threads/` - Thread state files
   - `aliases/` - Contact aliases
   - `export/` - Exported threads
-- **Logs**: `run-dev.command.log` (in project root, created by dev launcher)
+- **Logs**: `run-dev.command.log` (in project root)
 - **Config**: `.signalx.env` (in project root)
 
 ## 🎯 Common Tasks
@@ -134,147 +153,18 @@ open src-tauri/target/release/bundle/macos/SignalX.app
 2. Enter alias name in second field
 3. Click **"Set"**
 
-## 💾 Storage (SQLite)
-
-SignalX now uses SQLite for persistent storage of accounts, threads, messages, contacts, and automation rules.
-
-### Enable Storage
-Storage is enabled by default. To verify:
-```bash
-python3 tools/signalx_features.py list
-```
-
-The database is stored at: `~/Library/Application Support/SignalX/signalx.db`
-
-## 🔐 Authentication (Optional)
-
-### Enable Auth
-```bash
-python3 tools/signalx_features.py on auth.enabled
-```
-
-### Login Defaults (Dev Mode)
-On first run with auth enabled, a default admin user is created:
-- **Username**: `admin`
-- **Password**: `admin`
-
-⚠️ **Change these credentials in production!**
-
-### Login
-1. Launch the app
-2. If auth is enabled, you'll see a login screen
-3. Enter credentials (default: admin/admin in dev mode)
-4. Session is stored in memory (localStorage in dev)
-
-## 🤖 Automation Rules
-
-### Enable Rules
-```bash
-python3 tools/signalx_features.py on automation.rules
-```
-
-### Create Your First Rule
-1. Open the **Tools** panel
-2. Scroll to **Automation Rules** section
-3. Enter DSL in the textarea:
-```
-rule "Auto-Thanks"
-when message_in contains "thanks"
-then draft "You're welcome — got you."
-```
-4. Click **Create Rule**
-5. Toggle the rule **ON** to enable it
-
-### Rule DSL Syntax
-- `rule "Name"` - Rule name
-- `when message_in contains "text"` - Condition: message contains text
-- `when message_in from "+1234567890"` - Condition: message from number
-- `then draft "response"` - Action: create draft
-- `then send "response"` - Action: send message (requires `automation.send_enabled`)
-
-### Test Rules
-1. Select a thread
-2. In Rules section, click **Run Test**
-3. Rules will execute against the selected thread
-
-### Enable Auto-Send (Dangerous!)
-⚠️ **Warning**: Auto-send will automatically send messages without confirmation!
-```bash
-python3 tools/signalx_features.py on automation.send_enabled
-```
-
-## 🖥️ Headless Mode
-
-Run SignalX without the GUI for automation and server deployments.
-
-### Build Headless Binary
-```bash
-cd src-tauri
-cargo build --release --bin signalx-headless
-```
-
-### Run Headless
-```bash
-# Start receive loop (polls for new messages)
-./bin/signalx headless start
-
-# Send a message
-./bin/signalx headless send --to "+1234567890" --text "Hello"
-
-# List rules
-./bin/signalx headless rules list
-
-# Run rules once
-./bin/signalx headless rules run
-```
-
-### Headless with Auth
-In headless mode, you can bypass auth in dev:
-```bash
-./bin/signalx headless --as admin start
-```
-
-⚠️ **Warning**: Only use `--as admin` in development!
-
 ## 📚 Documentation
 
-- **Status & Testing**: `docs/STATUS.md`
-- **Build Instructions**: `docs/BUILD.md`
-- **Feature Handoff**: `docs/HANDOFF.md`
+- **Status & Testing**: `STATUS.md`
+- **Build Instructions**: `BUILD.md`
+- **Feature Handoff**: `HANDOFF.md`
 - **Main README**: `README.md`
 
 ## 🆘 Getting Help
 
 1. Check `run-dev.command.log` for errors
 2. Review Diagnostics panel in app
-3. Verify all prerequisites with `./scripts/testing/test-features.sh`
+3. Verify all prerequisites with `./scripts/test-features.sh`
 4. Check Health badge status
-
-## 🎯 Quick Reference
-
-### Run GUI
-```bash
-./scripts/dev/SignalX-Dev.command
-```
-
-### Run Headless
-```bash
-cd src-tauri && cargo build --release --bin signalx-headless
-./bin/signalx headless start
-```
-
-### Enable Rules
-```bash
-python3 tools/signalx_features.py on automation.rules
-```
-
-### Create First Rule
-1. Open Tools panel → Automation Rules
-2. Enter DSL and click "Create Rule"
-3. Toggle rule ON
-
-### Login Defaults (Dev Only)
-- Username: `admin`
-- Password: `admin`
 
 
