@@ -1,4 +1,3 @@
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { formatPhone, isGroupThread } from "./format";
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -9,8 +8,10 @@ import {
   type Order,
   type OutboxItem,
   type Product,
+  type Message,
   type ThreadActionSuggestion,
 } from "./api";
+import { fileSrcForPath } from "./attachmentPreview";
 
 function money(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
@@ -97,6 +98,7 @@ type Props = {
   customer: Customer | null;
   orders: Order[];
   products: Product[];
+  messages?: Message[];
   ai: AiStatus | null;
   aiBusy: boolean;
   onStatus: (msg: string | null) => void;
@@ -123,6 +125,7 @@ export function ProfileRail(props: Props) {
     customer,
     orders,
     products,
+    messages = [],
     ai,
     aiBusy,
     onStatus,
@@ -281,19 +284,23 @@ export function ProfileRail(props: Props) {
     }
   };
 
-  const attachThumbs = threadOutbox
-    .filter((i) => i.attachment_path)
+  const inboundThumbs = messages
+    .filter((m) => m.attachment_path)
     .slice(0, 12)
-    .map((i) => {
-      const path = i.attachment_path!;
-      let src = "";
-      try {
-        src = convertFileSrc(path);
-      } catch {
-        src = "";
-      }
-      return { id: i.id, path, src, label: path.split("/").pop() || "file" };
+    .map((m) => {
+      const path = m.attachment_path!;
+      return { id: m.id, path, src: fileSrcForPath(path), label: path.split("/").pop() || "file" };
     });
+  const attachThumbs = [
+    ...inboundThumbs,
+    ...threadOutbox
+      .filter((i) => i.attachment_path)
+      .slice(0, 12)
+      .map((i) => {
+        const path = i.attachment_path!;
+        return { id: i.id, path, src: fileSrcForPath(path), label: path.split("/").pop() || "file" };
+      }),
+  ];
 
   return (
     <aside className="profile-rail">
@@ -330,26 +337,24 @@ export function ProfileRail(props: Props) {
         <div className="profile-section-title">Contact</div>
         {!group && (
           <div className="profile-toggles">
-            <label className="toggle compact">
-              <input
-                type="checkbox"
-                checked={!!contact?.favorite}
-                onChange={(e) => onToggleFavorite(e.target.checked)}
-              />
+            <button
+              type="button"
+              className={contact?.favorite ? "chip active" : "chip"}
+              onClick={() => onToggleFavorite(!contact?.favorite)}
+            >
               Favorite
-            </label>
-            <label className="toggle compact">
-              <input
-                type="checkbox"
-                checked={!!contact?.muted}
-                onChange={(e) => onToggleMute(e.target.checked)}
-              />
+            </button>
+            <button
+              type="button"
+              className={contact?.muted ? "chip active" : "chip"}
+              onClick={() => onToggleMute(!contact?.muted)}
+            >
               Muted
-            </label>
+            </button>
           </div>
         )}
         {customer ? (
-          <p className="hint tight">Customer linked · {customer.display_name || customer.id.slice(0, 8)}</p>
+          <span className="status-pill status-ok">Linked</span>
         ) : !group ? (
           <button type="button" className="action-btn primary" onClick={onLinkCustomer}>
             Link as customer
@@ -401,7 +406,9 @@ export function ProfileRail(props: Props) {
         <div className="profile-section-title">Quick actions</div>
         {actionsBusy && <p className="hint tight">Suggesting…</p>}
         <div className="profile-chips">
-          {actions.map((a, i) => (
+          {actions
+            .filter((a) => !(a.kind === "link_customer" && !customer && !group))
+            .map((a, i) => (
             <button
               key={`${a.kind}-${i}`}
               type="button"
@@ -462,7 +469,7 @@ export function ProfileRail(props: Props) {
       <div className="profile-section">
         <div className="profile-section-title">Media</div>
         {attachThumbs.length === 0 && productThumbs.length === 0 && (
-          <p className="hint tight">No shared outbound files or product images yet.</p>
+          <p className="hint tight">No shared files or product images yet.</p>
         )}
         <div className="profile-media">
           {attachThumbs.map((t) => (

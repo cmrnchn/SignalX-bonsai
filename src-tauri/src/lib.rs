@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use base64::Engine;
 use uuid::Uuid;
+use sha2::{Sha256, Digest};
 
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex as AsyncMutex;
@@ -20,6 +21,8 @@ mod link;
 mod uom;
 mod backup;
 mod session;
+mod simple_audit;
+mod validation;
 use ivr::{thread_allowed, IvrMenus, IvrSettings, IvrStore};
 use commerce::{format_catalog_list, CommerceStore, Customer, Product};
 use commerce_audit::CommerceAuditStore;
@@ -27,6 +30,7 @@ use orders::{format_invoice, format_order_status, format_quote, Order, OrderLine
 use link::{DeviceLinkManager, DeviceLinkStatus};
 use backup::{export_data_bundle, import_data_bundle, ImportMode};
 use session::SessionControl;
+use simple_audit::SimpleAuditStore;
 
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 
@@ -74,6 +78,34 @@ const DEFAULT_AGENT_LAST_N: u32 = 50;
 const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
 const DEFAULT_OLLAMA_TIMEOUT_SECS: u64 = 120;
 const OLLAMA_PROBE_TIMEOUT_SECS: u64 = 3;
+
+// --------------------
+// Input Validation (M9)
+// --------------------
+/// Validate that a string is not empty after trimming
+fn validate_nonempty(value: &str, field: &str) -> Result<String, String> {
+  let trimmed = value.trim();
+  if trimmed.is_empty() {
+    return Err(format!("{} cannot be empty", field));
+  }
+  Ok(trimmed.to_string())
+}
+
+/// Validate that a numeric value is in range
+fn validate_in_range(value: i64, min: i64, max: i64, field: &str) -> Result<(), String> {
+  if value < min || value > max {
+    return Err(format!("{} must be between {} and {}", field, min, max));
+  }
+  Ok(())
+}
+
+/// Validate that a value is one of allowed options
+fn validate_enum(value: &str, allowed: &[&str], field: &str) -> Result<(), String> {
+  if !allowed.contains(&value) {
+    return Err(format!("{} must be one of: {}", field, allowed.join(", ")));
+  }
+  Ok(())
+}
 
 // --------------------
 // API helpers
@@ -232,6 +264,9 @@ struct Message {
   content: String,
   direction: Direction,
   raw_json: Option<Value>,
+  /// Absolute path under `{app_data}/attachments/` when present. Old JSON omits this.
+  #[serde(default)]
+  attachment_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1127,6 +1162,9 @@ struct GroupMeta {
   /// Opt-in auto-reply for this group. Off by default; groups stay off unless explicitly enabled.
   #[serde(default)]
   auto_reply_enabled: bool,
+  /// Group lifecycle: "active" (default) or "archived" (soft-deleted).
+  #[serde(default = "default_lifecycle")]
+  lifecycle: String,
   updated_at: i64,
 }
 
@@ -1529,6 +1567,12 @@ struct ContactMeta {
   /// Per-thread opt-in for auto-reply. Off by default.
   #[serde(default)]
   auto_reply_enabled: bool,
+  /// Operator notes.
+  #[serde(default)]
+  notes: String,
+  /// Contact lifecycle: "active" (default) or "archived" (soft-deleted).
+  #[serde(default = "default_lifecycle")]
+  lifecycle: String,
   updated_at: i64,
 }
 
@@ -2288,6 +2332,64 @@ fn envelope_source_name(v: &Value) -> Option<String> {
     .filter(|s| !s.is_empty())
 }
 
+fn first_data_attachment(data_msg: &Value) -> Option<&Value> {
+  data_msg
+    .get("attachments")
+    .and_then(|a| a.as_array())
+    .and_then(|a| a.first())
+}
+
+fn attachment_str<'a>(att: &'a Value, keys: &[&str]) -> Option<&'a str> {
+  for k in keys {
+    if let Some(s) = att.get(*k).and_then(|x| x.as_str()).map(|s| s.trim()).filter(|s| !s.is_empty()) {
+      return Some(s);
+    }
+  }
+  None
+}
+
+fn attachment_display_name(att: &Value) -> Option<String> {
+  attachment_str(att, &["filename", "fileName", "name"]).map(|s| s.to_string())
+}
+
+fn attachment_source_path(att: &Value) -> Option<PathBuf> {
+  let raw = attachment_str(att, &["file", "storedFilename", "path", "localPath"])?;
+  let p = PathBuf::from(raw);
+  if p.is_file() {
+    Some(p)
+  } else {
+    None
+  }
+}
+
+fn ext_from_attachment(att: &Value) -> String {
+  if let Some(name) = attachment_display_name(att) {
+    if let Some(ext) = Path::new(&name).extension().and_then(|e| e.to_str()) {
+      if normalize_attachment_ext(ext).is_ok() {
+        return ext.to_lowercase();
+      }
+    }
+  }
+  match attachment_str(att, &["contentType", "content_type"]).unwrap_or("") {
+    "image/jpeg" | "image/jpg" => "jpg".into(),
+    "image/png" => "png".into(),
+    "image/gif" => "gif".into(),
+    "image/webp" => "webp".into(),
+    "application/pdf" => "pdf".into(),
+    _ => "bin".into(),
+  }
+}
+
+fn persist_inbound_attachment(app_data_dir: &Path, msg_id: &str, att: &Value) -> Option<String> {
+  let src = attachment_source_path(att)?;
+  let ext = normalize_attachment_ext(&ext_from_attachment(att)).unwrap_or_else(|_| "bin".into());
+  let dir = app_data_dir.join("attachments");
+  std::fs::create_dir_all(&dir).ok()?;
+  let dest = dir.join(format!("{}.{}", sanitize_filename(msg_id), ext));
+  std::fs::copy(&src, &dest).ok()?;
+  Some(dest.to_string_lossy().to_string())
+}
+
 /// Prefer E.164 sourceNumber over UUID `source` for stable thread ids.
 fn envelope_peer_id(env: &Value) -> String {
   if let Some(num) = env
@@ -2306,7 +2408,11 @@ fn envelope_peer_id(env: &Value) -> String {
     .to_string()
 }
 
-fn normalize_incoming_message(my_number: &str, v: &Value) -> Option<(Message, Vec<String>)> {
+fn normalize_incoming_message(
+  my_number: &str,
+  v: &Value,
+  app_data_dir: Option<&Path>,
+) -> Option<(Message, Vec<String>)> {
   let env = v.get("envelope")?;
   let ts = env.get("timestamp").and_then(|x| x.as_i64()).unwrap_or_else(now_ms);
   let source = envelope_peer_id(env);
@@ -2318,14 +2424,12 @@ fn normalize_incoming_message(my_number: &str, v: &Value) -> Option<(Message, Ve
     .get("message")
     .and_then(|x| x.as_str())
     .map(|s| s.to_string());
-  let has_attachments = data_msg
-    .get("attachments")
-    .and_then(|a| a.as_array())
-    .map(|a| !a.is_empty())
-    .unwrap_or(false);
+  let att = first_data_attachment(data_msg);
   let content = match text {
     Some(s) if !s.trim().is_empty() => s,
-    _ if has_attachments => "[attachment]".to_string(),
+    _ if att.is_some() => att
+      .and_then(attachment_display_name)
+      .unwrap_or_else(|| "[attachment]".to_string()),
     _ => return None,
   };
 
@@ -2340,6 +2444,9 @@ fn normalize_incoming_message(my_number: &str, v: &Value) -> Option<(Message, Ve
   }
 
   let id = format!("incoming-{}-{}-{}", source, ts, source_device);
+  let attachment_path = att.and_then(|a| {
+    app_data_dir.and_then(|root| persist_inbound_attachment(root, &id, a))
+  });
 
   let msg = Message {
     id,
@@ -2350,6 +2457,7 @@ fn normalize_incoming_message(my_number: &str, v: &Value) -> Option<(Message, Ve
     content,
     direction: Direction::Incoming,
     raw_json: Some(v.clone()),
+    attachment_path,
   };
 
   let mut participants: Vec<String> = vec![];
@@ -2375,7 +2483,8 @@ fn normalize_incoming_message(my_number: &str, v: &Value) -> Option<(Message, Ve
 
 fn normalize_outgoing_message(my_number: &str, thread_id: &str, recipient: &str, content: &str) -> (Message, Vec<String>) {
   let ts = now_ms();
-  let id = format!("outgoing-{}-{}", recipient, ts);
+  let uuid = uuid::Uuid::new_v4().simple();
+  let id = format!("outgoing-{}-{}-{}", recipient, ts, uuid);
   let msg = Message {
     id,
     thread_id: thread_id.to_string(),
@@ -2385,6 +2494,7 @@ fn normalize_outgoing_message(my_number: &str, thread_id: &str, recipient: &str,
     content: content.to_string(),
     direction: Direction::Outgoing,
     raw_json: None,
+    attachment_path: None,
   };
   (msg, vec![my_number.to_string(), recipient.to_string()])
 }
@@ -2441,6 +2551,7 @@ struct AutoReplySettings {
 
 fn default_max_per_thread() -> u32 { 3 }
 fn default_max_per_window() -> u32 { 20 }
+fn default_lifecycle() -> String { "active".to_string() }
 fn default_window_secs() -> u64 { 3600 }
 
 impl Default for AutoReplySettings {
@@ -2468,6 +2579,22 @@ struct AutoReplyAuditEntry {
   /// "sent" | "draft_only" | "blocked"
   outcome: String,
   reason: Option<String>,
+  /// Actor that triggered this event (always "system" for auto-reply)
+  #[serde(default)]
+  actor: Option<String>,
+}
+
+fn redact_draft(full_draft: &str) -> String {
+  let mut hasher = Sha256::new();
+  hasher.update(full_draft.as_bytes());
+  let hash = format!("{:x}", hasher.finalize());
+  let hash_short = &hash[..16.min(hash.len())];
+  let summary = if full_draft.len() > 50 {
+    format!("{}... [#{}]", &full_draft[..50], hash_short)
+  } else {
+    format!("{} [#{}]", full_draft, hash_short)
+  };
+  summary
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -2683,6 +2810,8 @@ struct AppState {
   commerce: CommerceStore,
   orders: OrderStore,
   commerce_audit: CommerceAuditStore,
+  ivr_audit: SimpleAuditStore,
+  outbox_audit: SimpleAuditStore,
   device_link: DeviceLinkManager,
   /// After a backup import, memory may still be stale until restart.
   /// Writes fail closed so they cannot overwrite imported files.
@@ -2766,6 +2895,8 @@ fn reload_shop_stores(state: &AppState, account_id: &str) {
   state.commerce_audit.reload_from(&dir);
   state.ivr.reload_from(&dir);
   state.auto_reply.reload_from(&dir);
+  state.ivr_audit.reload_from(&dir, "ivr/audit.json");
+  state.outbox_audit.reload_from(&dir, "outbox/audit.json");
 }
 
 fn reload_all_stores(state: &AppState, account_id: &str) {
@@ -3335,6 +3466,17 @@ fn set_contact_meta(state: &AppState, contact_id: String, patch: ContactMetaPatc
   if cid.is_empty() {
     return err("contact_id cannot be empty".to_string());
   }
+  // M9: Validate patch fields
+  if let Some(Some(name)) = &patch.display_name {
+    if name.len() > 255 {
+      return err("display_name must be <= 255 chars".to_string());
+    }
+  }
+  if let Some(Some(alias)) = &patch.alias {
+    if alias.len() > 255 {
+      return err("alias must be <= 255 chars".to_string());
+    }
+  }
   match state.contact_store.upsert_patch(&account_id, cid, patch) {
     Ok(m) => {
       ok_t(m)
@@ -3355,6 +3497,14 @@ fn delete_contact_meta(state: &AppState, contact_id: String) -> Value {
   match state.contact_store.delete(&account_id, cid) {
     Ok(changed) => {
       if changed {
+        state.commerce_audit.record(
+          "contact_deleted",
+          &format!("Contact {} deleted", contact_id),
+          None,
+          None,
+          None,
+          now_ms(),
+        );
       }
       ok(json!(changed))
     }
@@ -3486,6 +3636,17 @@ fn set_group_meta(state: &AppState, group_id: String, patch: GroupMetaPatch) -> 
   if gid.is_empty() {
     return err("group_id cannot be empty".to_string());
   }
+  // M9: Validate patch fields
+  if let Some(Some(name)) = &patch.display_name {
+    if name.len() > 255 {
+      return err("display_name must be <= 255 chars".to_string());
+    }
+  }
+  if let Some(notes) = &patch.notes {
+    if notes.len() > 2000 {
+      return err("notes must be <= 2000 chars".to_string());
+    }
+  }
   match state.group_store.upsert_patch(&account_id, gid, patch) {
     Ok(m) => {
       ok_t(m)
@@ -3506,6 +3667,14 @@ fn delete_group_meta(state: &AppState, group_id: String) -> Value {
   match state.group_store.delete(&account_id, gid) {
     Ok(changed) => {
       if changed {
+        state.commerce_audit.record(
+          "group_deleted",
+          &format!("Group {} deleted", group_id),
+          None,
+          None,
+          None,
+          now_ms(),
+        );
       }
       ok(json!(changed))
     }
@@ -4318,7 +4487,7 @@ fn export_account(state: &AppState, format: String, from_ts: Option<i64>, to_ts:
   }))
 }
 
-fn export_data_bundle_cmd(state: &AppState) -> Value {
+fn export_data_bundle_cmd(state: &AppState, password: Option<String>) -> Value {
   let account = match state.account_manager.get_active() {
     Some(a) => a,
     None => return err("No active account".to_string()),
@@ -4330,6 +4499,7 @@ fn export_data_bundle_cmd(state: &AppState) -> Value {
     &account,
     now_ms(),
     version,
+    password.as_deref(),
   ) {
     Ok((path, bytes, counts)) => ok(json!({
       "path": path.to_string_lossy(),
@@ -4348,6 +4518,7 @@ fn import_data_bundle_cmd(
   path: Option<String>,
   bytes_base64: Option<String>,
   mode: String,
+  password: Option<String>,
 ) -> Value {
   let account = match state.account_manager.get_active() {
     Some(a) => a,
@@ -4390,6 +4561,7 @@ fn import_data_bundle_cmd(
     &account,
     mode,
     now_ms(),
+    password.as_deref(),
   ) {
     Ok(v) => {
       reload_all_stores(state, &account);
@@ -4475,10 +4647,11 @@ fn trigger_agent_draft(state: AppState, agent: AgentModeConfig, ts: ThreadState,
               account_id: account_id.clone(),
               thread_id: tid.clone(),
               message_id: mid.clone(),
-              draft: draft.clone(),
+              draft: redact_draft(&draft),
               created_at: now_ms(),
               outcome: outcome.to_string(),
               reason,
+              actor: Some("system".to_string()),
             };
             state_for_auto.auto_reply.append_audit(entry.clone());
             emit_auto_reply_audit(&entry);
@@ -4489,10 +4662,11 @@ fn trigger_agent_draft(state: AppState, agent: AgentModeConfig, ts: ThreadState,
               account_id: account_id.clone(),
               thread_id: tid.clone(),
               message_id: mid.clone(),
-              draft: draft.clone(),
+              draft: redact_draft(&draft),
               created_at: now_ms(),
               outcome: "draft_only".to_string(),
               reason: Some(reason),
+              actor: Some("system".to_string()),
             };
             state_for_auto.auto_reply.append_audit(entry.clone());
             emit_auto_reply_audit(&entry);
@@ -4601,7 +4775,9 @@ async fn receive_loop(state: AppState, agent_mode: Option<AgentModeConfig>) {
           let ts = state.account_manager.get_or_create(&account);
 
           for v in list.iter() {
-            if let Some((msg, participants)) = normalize_incoming_message(&my_number, v) {
+            if let Some((msg, participants)) =
+              normalize_incoming_message(&my_number, v, Some(&state.app_data_dir))
+            {
               let thread_id = msg.thread_id.clone();
               let msg_id = msg.id.clone();
               if let Some(name) = envelope_source_name(v) {
@@ -4693,7 +4869,10 @@ fn ensure_outbox_worker(state: AppState, account_id: String) {
       if !state.session.is_current(my_gen) {
         item.state = "queued".to_string();
         item.last_error = Some("session switched".to_string());
-        let _ = state.outbox_store.update_item_async(&account_id, item).await;
+        // Use sync update to ensure revert completes before breaking
+        if let Err(e) = state.outbox_store.update_item(&account_id, item) {
+          eprintln!("OUTBOX: failed to revert sending→queued on session switch: {}", e);
+        }
         break;
       }
 
@@ -4707,6 +4886,7 @@ fn ensure_outbox_worker(state: AppState, account_id: String) {
             emit_outbox_updated(&account_id, Some(&item.thread_id), summary);
           }
           emit_outbox_item_updated(&item);
+          note_outbox_failure(&state, &item);
           tokio::time::sleep(std::time::Duration::from_millis(600)).await;
           continue;
         }
@@ -4721,6 +4901,7 @@ fn ensure_outbox_worker(state: AppState, account_id: String) {
             emit_outbox_updated(&account_id, Some(&item.thread_id), summary);
           }
           emit_outbox_item_updated(&item);
+          note_outbox_failure(&state, &item);
           tokio::time::sleep(std::time::Duration::from_millis(600)).await;
           continue;
         }
@@ -4755,6 +4936,7 @@ fn ensure_outbox_worker(state: AppState, account_id: String) {
           emit_outbox_updated(&account_id, Some(&item.thread_id), summary);
         }
         emit_outbox_item_updated(&item);
+        note_outbox_failure(&state, &item);
         continue;
       }
 
@@ -4797,32 +4979,50 @@ fn ensure_outbox_worker(state: AppState, account_id: String) {
         Ok(_) => {
           item.state = "sent".to_string();
           item.last_error = None;
-          let _ = state.outbox_store.update_item_async(&account_id, item.clone()).await;
-          if let Ok(summary) = state.outbox_store.summary_async(&account_id).await {
-            emit_outbox_updated(&account_id, Some(&item.thread_id), summary);
-          }
-          emit_outbox_item_updated(&item);
+          match state.outbox_store.update_item_async(&account_id, item.clone()).await {
+            Ok(_) => {
+              if let Ok(summary) = state.outbox_store.summary_async(&account_id).await {
+                emit_outbox_updated(&account_id, Some(&item.thread_id), summary);
+              }
+              emit_outbox_item_updated(&item);
 
-          // Persist + emit normalized message (canonical flow).
-          let ts = state.account_manager.get_or_create(&account_id);
-          let (msg, participants) = normalize_outgoing_message(&my_number, &item.thread_id, &raw_recipient, &item.content);
-          let ts2 = ts.clone();
-          let msg2 = msg.clone();
-          let participants2 = participants.clone();
-          let _ = tokio::task::spawn_blocking(move || {
-            ts2.add_message(msg2, participants2);
-          })
-          .await;
-          emit_message_new(&account_id, &msg);
+              // Persist + emit normalized message (canonical flow).
+              let ts = state.account_manager.get_or_create(&account_id);
+              let (msg, participants) = normalize_outgoing_message(&my_number, &item.thread_id, &raw_recipient, &item.content);
+              let ts2 = ts.clone();
+              let msg2 = msg.clone();
+              let participants2 = participants.clone();
+              let _ = tokio::task::spawn_blocking(move || {
+                ts2.add_message(msg2, participants2);
+              })
+              .await;
+              emit_message_new(&account_id, &msg);
+            }
+            Err(e) => {
+              eprintln!("OUTBOX: failed to persist sent state for {}: {}", item.id, e);
+              item.state = "failed".to_string();
+              item.last_error = Some(format!("failed to persist sent state: {}", e));
+              let _ = state.outbox_store.update_item_async(&account_id, item.clone()).await;
+              emit_outbox_item_updated(&item);
+            }
+          }
         }
         Err(e) => {
           item.state = "failed".to_string();
           item.last_error = Some(e);
-          let _ = state.outbox_store.update_item_async(&account_id, item.clone()).await;
+          match state.outbox_store.update_item_async(&account_id, item.clone()).await {
+            Ok(_) => {
+              emit_outbox_item_updated(&item);
+            }
+            Err(persist_err) => {
+              eprintln!("OUTBOX: failed to persist failed state for {}: {}", item.id, persist_err);
+            }
+          }
           if let Ok(summary) = state.outbox_store.summary_async(&account_id).await {
             emit_outbox_updated(&account_id, Some(&item.thread_id), summary);
           }
           emit_outbox_item_updated(&item);
+          note_outbox_failure(&state, &item);
           tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
       }
@@ -4906,10 +5106,38 @@ fn set_auto_reply_settings(state: &AppState, settings: AutoReplySettings) -> Val
   match state.auto_reply.set_settings(settings) {
     Ok(s) => {
       emit_event("auto-reply://settings", s.clone());
+      state.commerce_audit.record(
+        "auto_reply_settings_updated",
+        "Auto-reply settings modified",
+        None,
+        None,
+        None,
+        now_ms(),
+      );
       ok_t(s)
     }
     Err(e) => err(e),
   }
+}
+
+fn list_ivr_audit(state: &AppState, limit: Option<u32>) -> Value {
+  let n = limit.unwrap_or(100).min(500) as usize;
+  ok_t(state.ivr_audit.list(n))
+}
+
+fn list_outbox_audit(state: &AppState, limit: Option<u32>) -> Value {
+  let n = limit.unwrap_or(100).min(500) as usize;
+  ok_t(state.outbox_audit.list(n))
+}
+
+fn note_outbox_failure(state: &AppState, item: &OutboxItem) {
+  let err = item.last_error.as_deref().unwrap_or("send failed");
+  state.outbox_audit.record(
+    &item.thread_id,
+    &format!("Outbox send failed: {err}"),
+    "failed",
+    now_ms(),
+  );
 }
 
 fn list_auto_reply_audit(state: &AppState, limit: Option<u32>) -> Value {
@@ -5043,6 +5271,8 @@ fn build_app_state() -> AppState {
     commerce: CommerceStore::new(&app_data_dir),
     orders: OrderStore::new(&app_data_dir),
     commerce_audit: CommerceAuditStore::new(&app_data_dir),
+    ivr_audit: SimpleAuditStore::at_account(&app_data_dir, "ivr/audit.json"),
+    outbox_audit: SimpleAuditStore::at_account(&app_data_dir, "outbox/audit.json"),
     device_link: DeviceLinkManager::new(),
     import_locked: Arc::new(AtomicBool::new(false)),
   }
@@ -5099,7 +5329,25 @@ fn maybe_handle_ivr(state: &AppState, thread_id: &str, content: &str) -> bool {
   }
 
   let menus = state.ivr.menus();
+  let prev_node = session.node_id.clone();
   let result = ivr::step(session, content, &menus, now);
+  if result.handled {
+    let input = content.trim();
+    if prev_node == menus.entry || input.eq_ignore_ascii_case("menu") || input == "0" {
+      state.ivr_audit.record(thread_id, "Entered buyer menu", "ok", now);
+    }
+    if !input.is_empty() {
+      state.ivr_audit.record(
+        thread_id,
+        &format!("Digit '{}' (node {})", input, result.session.node_id),
+        "ok",
+        now,
+      );
+    }
+    if result.action.as_deref() == Some("place_order") {
+      state.ivr_audit.record(thread_id, "Order placed via IVR", "ok", now);
+    }
+  }
   let _ = state.ivr.save_session(&account, result.session.clone());
   emit_event(
     "ivr://session",
@@ -5260,6 +5508,14 @@ fn set_ivr_settings(state: &AppState, settings: IvrSettings) -> Value {
   match state.ivr.set_settings(settings) {
     Ok(s) => {
       emit_event("ivr://settings", s.clone());
+      state.commerce_audit.record(
+        "ivr_settings_updated",
+        "IVR settings modified",
+        None,
+        None,
+        None,
+        now_ms(),
+      );
       ok_t(s)
     }
     Err(e) => err(e),
@@ -5276,6 +5532,14 @@ fn set_ivr_menus(state: &AppState, menus: IvrMenus) -> Value {
   }
   match state.ivr.set_menus(menus) {
     Ok(m) => {
+      state.commerce_audit.record(
+        "ivr_menus_updated",
+        &format!("IVR menus updated ({} nodes)", m.nodes.len()),
+        None,
+        None,
+        None,
+        now_ms(),
+      );
       emit_event("ivr://menus", m.clone());
       ok_t(m)
     }
@@ -5287,6 +5551,14 @@ fn reset_ivr_menus(state: &AppState) -> Value {
   match state.ivr.reset_menus_to_demo() {
     Ok(m) => {
       emit_event("ivr://menus", m.clone());
+      state.commerce_audit.record(
+        "ivr_menus_reset",
+        "IVR menus reset to default",
+        None,
+        None,
+        None,
+        now_ms(),
+      );
       ok_t(m)
     }
     Err(e) => err(e),
@@ -5404,12 +5676,47 @@ fn list_products(state: &AppState) -> Value {
   ok_t(state.commerce.list_products())
 }
 
-fn upsert_product(state: &AppState, product: Product) -> Value {
+fn upsert_product(state: &AppState, mut product: Product) -> Value {
   if let Some(v) = reject_if_import_locked(state) {
     return v;
   }
-  match state.commerce.upsert_product(product, now_ms()) {
+
+  // Validate input
+  if let Err(e) = validation::validate_name(&product.name, "Product name") {
+    return err(e.0);
+  }
+  if let Err(e) = validation::validate_price(product.price_cents) {
+    return err(e.0);
+  }
+  if product.quantity_base_milli > 0 {
+    let qty_in_base = product.quantity_base_milli as f64 / 1000.0;
+    if let Err(e) = validation::validate_stock_quantity(qty_in_base) {
+      return err(e.0);
+    }
+  }
+
+  // Normalize SKU
+  match validation::validate_and_normalize_sku(&product.sku) {
+    Ok(normalized_sku) => product.sku = normalized_sku,
+    Err(e) => return err(e.0),
+  }
+
+  match state.commerce.upsert_product(product.clone(), now_ms()) {
     Ok(p) => {
+      let is_new = product.id.is_empty();
+      state.commerce_audit.record(
+        if is_new { "product_created" } else { "product_updated" },
+        &format!(
+          "{} · {}{}",
+          p.name,
+          if is_new { "created" } else { "updated" },
+          if !p.sku.is_empty() { format!(" ({})", p.sku) } else { String::new() }
+        ),
+        None,
+        Some(p.id.clone()),
+        None,
+        now_ms(),
+      );
       emit_event("commerce://products", state.commerce.list_products());
       ok_t(p)
     }
@@ -5424,6 +5731,16 @@ fn delete_product(state: &AppState, id: String) -> Value {
   match state.commerce.delete_product(id.trim()) {
     Ok(deleted) => {
       emit_event("commerce://products", state.commerce.list_products());
+      if deleted {
+        state.commerce_audit.record(
+          "product_deleted",
+          &format!("Product {} deleted", id),
+          None,
+          Some(id.clone()),
+          None,
+          now_ms(),
+        );
+      }
       ok(json!({ "deleted": deleted }))
     }
     Err(e) => err(e),
@@ -5623,8 +5940,22 @@ fn upsert_customer(state: &AppState, customer: Customer) -> Value {
   if let Some(v) = reject_if_import_locked(state) {
     return v;
   }
-  match state.commerce.upsert_customer(customer, now_ms()) {
+
+  if let Err(e) = validation::validate_name(&customer.display_name, "Customer name") {
+    return err(e.0);
+  }
+
+  match state.commerce.upsert_customer(customer.clone(), now_ms()) {
     Ok(c) => {
+      let is_new = customer.id.is_empty();
+      state.commerce_audit.record(
+        if is_new { "customer_created" } else { "customer_updated" },
+        &format!("{} {}", c.display_name, if is_new { "created" } else { "updated" }),
+        None,
+        None,
+        Some(c.thread_id.clone()),
+        now_ms(),
+      );
       emit_event("commerce://customers", state.commerce.list_customers());
       ok_t(c)
     }
@@ -5635,6 +5966,16 @@ fn upsert_customer(state: &AppState, customer: Customer) -> Value {
 fn delete_customer(state: &AppState, id: String) -> Value {
   match state.commerce.delete_customer(id.trim()) {
     Ok(deleted) => {
+      if deleted {
+        state.commerce_audit.record(
+          "customer_deleted",
+          &format!("Customer {} deleted", id),
+          None,
+          None,
+          None,
+          now_ms(),
+        );
+      }
       emit_event("commerce://customers", state.commerce.list_customers());
       ok(json!({ "deleted": deleted }))
     }
@@ -6094,6 +6435,46 @@ fn sales_summary(
 }
 
 // --------------------
+// Feedback storage
+// --------------------
+fn save_feedback_impl(
+  feedback: String,
+  timestamp: String,
+  user_agent: String,
+  url: String,
+) -> Result<(), String> {
+  let feedback_dir = std::env::var("HOME")
+    .ok()
+    .and_then(|home| Some(PathBuf::from(home).join(".signalx_feedback")))
+    .ok_or_else(|| "Could not determine home directory".to_string())?;
+
+  std::fs::create_dir_all(&feedback_dir)
+    .map_err(|e| format!("Failed to create feedback directory: {}", e))?;
+
+  let filename = format!(
+    "feedback-{}.json",
+    std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .map(|d| d.as_millis())
+      .unwrap_or(0)
+  );
+
+  let entry = json!({
+    "timestamp": timestamp,
+    "feedback": feedback,
+    "userAgent": user_agent,
+    "url": url,
+  });
+
+  let filepath = feedback_dir.join(filename);
+  std::fs::write(&filepath, serde_json::to_string_pretty(&entry).unwrap_or_default())
+    .map_err(|e| format!("Failed to write feedback: {}", e))?;
+
+  eprintln!("Feedback saved to: {:?}", filepath);
+  Ok(())
+}
+
+// --------------------
 // Tauri command wrappers
 // --------------------
 #[tauri::command]
@@ -6328,8 +6709,8 @@ fn cmd_export_account(
   export_account(&state, format, from_ts, to_ts)
 }
 #[tauri::command]
-fn cmd_export_data_bundle(state: State<'_, AppState>) -> Value {
-  export_data_bundle_cmd(&state)
+fn cmd_export_data_bundle(state: State<'_, AppState>, password: Option<String>) -> Value {
+  export_data_bundle_cmd(&state, password)
 }
 #[tauri::command]
 fn cmd_import_data_bundle(
@@ -6337,8 +6718,9 @@ fn cmd_import_data_bundle(
   path: Option<String>,
   bytes_base64: Option<String>,
   mode: String,
+  password: Option<String>,
 ) -> Value {
-  import_data_bundle_cmd(&state, path, bytes_base64, mode)
+  import_data_bundle_cmd(&state, path, bytes_base64, mode, password)
 }
 #[tauri::command]
 fn cmd_get_auto_reply_settings(state: State<'_, AppState>) -> Value {
@@ -6351,6 +6733,14 @@ fn cmd_set_auto_reply_settings(state: State<'_, AppState>, settings: AutoReplySe
 #[tauri::command]
 fn cmd_list_auto_reply_audit(state: State<'_, AppState>, limit: Option<u32>) -> Value {
   list_auto_reply_audit(&state, limit)
+}
+#[tauri::command]
+fn cmd_list_ivr_audit(state: State<'_, AppState>, limit: Option<u32>) -> Value {
+  list_ivr_audit(&state, limit)
+}
+#[tauri::command]
+fn cmd_list_outbox_audit(state: State<'_, AppState>, limit: Option<u32>) -> Value {
+  list_outbox_audit(&state, limit)
 }
 #[tauri::command]
 fn cmd_set_thread_auto_reply(
@@ -6807,6 +7197,18 @@ fn cmd_rename_account(state: State<'_, AppState>, id: String, label: String) -> 
 fn cmd_remove_from_roster(state: State<'_, AppState>, id: String, pin: String) -> Value {
   remove_from_roster(&state, id, pin)
 }
+#[tauri::command]
+fn cmd_save_feedback(
+  feedback: String,
+  timestamp: String,
+  user_agent: String,
+  url: String,
+) -> Value {
+  match save_feedback_impl(feedback, timestamp, user_agent, url) {
+    Ok(()) => ok(json!({})),
+    Err(e) => err(e),
+  }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -6888,6 +7290,8 @@ pub fn run() {
       cmd_get_auto_reply_settings,
       cmd_set_auto_reply_settings,
       cmd_list_auto_reply_audit,
+      cmd_list_ivr_audit,
+      cmd_list_outbox_audit,
       cmd_set_thread_auto_reply,
       cmd_get_thread_auto_reply,
       cmd_get_ivr_settings,
@@ -6932,6 +7336,7 @@ pub fn run() {
       cmd_set_account_pin,
       cmd_rename_account,
       cmd_remove_from_roster,
+      cmd_save_feedback,
     ])
     .run(tauri::generate_context!())
     .expect("error while running SignalX");
@@ -7022,7 +7427,7 @@ mod foundation_tests {
         "receiptMessage": { "isDelivery": true, "timestamps": [1], "when": 1 }
       }
     });
-    assert!(normalize_incoming_message("+16172990756", &receipt).is_none());
+    assert!(normalize_incoming_message("+16172990756", &receipt, None).is_none());
 
     let text = json!({
       "envelope": {
@@ -7034,7 +7439,7 @@ mod foundation_tests {
         "dataMessage": { "message": "hello from Keelan" }
       }
     });
-    let (msg, _) = normalize_incoming_message("+16172990756", &text).expect("text msg");
+    let (msg, _) = normalize_incoming_message("+16172990756", &text, None).expect("text msg");
     assert_eq!(msg.content, "hello from Keelan");
     assert_eq!(msg.thread_id, "+17028575560");
     assert_eq!(envelope_source_name(&text).as_deref(), Some("Keelan Miskel"));
@@ -7042,6 +7447,37 @@ mod foundation_tests {
       r#"{"envelope":{"receiptMessage":{"isDelivery":true},"source":"+17028575560"}}"#
     ));
     assert!(!is_envelope_noise_content("if you can do tomorrow night"));
+  }
+
+  #[test]
+  fn inbound_attachment_copied_into_app_data() {
+    let root = std::env::temp_dir().join(format!("signalx-att-{}", Uuid::new_v4()));
+    let src = std::env::temp_dir().join(format!("signalx-src-{}.jpg", Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(&src, b"fake-jpeg").unwrap();
+    let env = json!({
+      "envelope": {
+        "sourceNumber": "+17028575560",
+        "sourceDevice": 1,
+        "timestamp": 9,
+        "dataMessage": {
+          "message": "",
+          "attachments": [{
+            "filename": "patio.jpg",
+            "contentType": "image/jpeg",
+            "file": src.to_string_lossy(),
+          }]
+        }
+      }
+    });
+    let (msg, _) = normalize_incoming_message("+16172990756", &env, Some(&root)).expect("att");
+    assert_eq!(msg.content, "patio.jpg");
+    let path = msg.attachment_path.expect("path");
+    assert!(path.contains("attachments"));
+    assert!(path.ends_with(".jpg"));
+    assert_eq!(std::fs::read(&path).unwrap(), b"fake-jpeg");
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_file(&src);
   }
 
   #[test]
@@ -7077,5 +7513,23 @@ mod foundation_tests {
     });
     assert!(roster.verify_unlock("not-a-member", "").unwrap_err().contains("unknown"));
     assert!(roster.verify_unlock("../escape", "").unwrap_err().contains("unknown"));
+  }
+
+  #[test]
+  fn outgoing_message_ids_are_unique_under_burst() {
+    let my_number = "+12025551212";
+    let thread_id = "dm:+13105551234";
+    let recipient = "+13105551234";
+
+    // Generate 50 message IDs to same recipient in rapid succession
+    let mut ids = std::collections::HashSet::new();
+    for i in 0..50 {
+      let content = format!("message {}", i);
+      let (msg, _) = normalize_outgoing_message(my_number, thread_id, recipient, &content);
+      ids.insert(msg.id);
+    }
+
+    // All 50 IDs must be distinct
+    assert_eq!(ids.len(), 50, "Message IDs must be unique under high-frequency sends to same recipient");
   }
 }

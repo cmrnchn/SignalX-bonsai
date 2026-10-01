@@ -28,8 +28,11 @@ import {
   IconTruck,
   IconX,
 } from "../../navIcons";
-import { USE_FIXTURES, fxMessages, fxThreadPreviews } from "../../devFixtures";
+import { USE_FIXTURES, fxMessages } from "../../devFixtures";
 import { WhyTip } from "../WhyTip";
+import { useEscapeLayer } from "../../overlayEscape";
+import { useContextMenu, ContextMenu, MenuEditor, getMenuByObjectType, updateMenu } from "../ContextMenu";
+import { getContactContextMenuItems } from "../../contextMenuHelpers";
 import { actionsFor, buildDirectory, insightsFor, type Person, type PersonStatus, type PersonType } from "./people";
 
 const TYPES: PersonType[] = ["Consumer", "Supplier", "Team"];
@@ -114,6 +117,7 @@ type Props = {
   createGroup: () => void | Promise<void>;
   searchQuery?: string;
   searchQueryTick?: number;
+  topNotice?: ReactNode;
 };
 
 export function PeopleScreen({
@@ -140,6 +144,7 @@ export function PeopleScreen({
   createGroup,
   searchQuery = "",
   searchQueryTick = 0,
+  topNotice,
 }: Props) {
   const [q, setQ] = useState(searchQuery);
   const [activeTypes, setActiveTypes] = useState<PersonType[]>([]);
@@ -148,11 +153,15 @@ export function PeopleScreen({
   const [sortAsc, setSortAsc] = useState(true);
   const [menu, setMenu] = useState<null | "add" | "filter" | "status" | "tags" | "more">(null);
   const [composer, setComposer] = useState<null | "contact" | "group">(null);
-  const [previews, setPreviews] = useState<Record<string, string | null>>({});
   const [notesDraft, setNotesDraft] = useState<string | null>(null);
   const [recent, setRecent] = useState<Message[]>([]);
   const [showArchived, setShowArchived] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const contextMenu = useContextMenu();
+  const [menuEditorOpen, setMenuEditorOpen] = useState(false);
+  useEscapeLayer(!!menu, () => setMenu(null));
+  useEscapeLayer(!!composer, () => setComposer(null));
+  useEscapeLayer(!!confirmDelete, () => setConfirmDelete(null));
   // The backend has no archive column, so this is a local hide-list. Swap it
   // for a real field once one exists — nothing else depends on the shape.
   const [archived, setArchived] = useState<Set<string>>(() => {
@@ -208,26 +217,11 @@ export function PeopleScreen({
     [directory, selectedKey],
   );
 
-  // ThreadSummary carries no snippet, so the preview line needs one call per
-  // thread. Capped and cached; a last_message field on the summary would remove this.
-  useEffect(() => {
-    const wanted = visible.slice(0, 30).filter((p) => !(p.threadId in previews));
-    if (wanted.length === 0) return;
-    let cancelled = false;
-    void (async () => {
-      const found: Record<string, string | null> = {};
-      for (const p of wanted) {
-        const res = await api.getThreadMessages(p.threadId);
-        const live = res.success && res.data.length ? res.data[res.data.length - 1].content : null;
-        found[p.threadId] = live ?? (USE_FIXTURES ? (fxThreadPreviews[p.threadId] ?? null) : null);
-      }
-      if (!cancelled) setPreviews((prev) => ({ ...prev, ...found }));
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible]);
+  const previewByThreadId = useMemo(() => {
+    const map: Record<string, string | null> = {};
+    for (const t of threads) map[t.id] = t.last_preview || null;
+    return map;
+  }, [threads]);
 
   useEffect(() => setNotesDraft(null), [selectedKey]);
 
@@ -589,7 +583,7 @@ export function PeopleScreen({
             <p className="hint">No one matches these filters.</p>
           )}
           {visible.map((p) => {
-            const preview = previews[p.threadId];
+            const preview = previewByThreadId[p.threadId];
             const attention = p.statuses.includes("Needs attention");
             const unread = p.unreadCount > 0;
             const cls = [
@@ -601,7 +595,36 @@ export function PeopleScreen({
               .filter(Boolean)
               .join(" ");
             return (
-              <button key={p.key} type="button" className={cls} onClick={() => onSelectKey(p.key)}>
+              <button
+                key={p.key}
+                type="button"
+                className={cls}
+                onClick={() => onSelectKey(p.key)}
+                onContextMenu={(e) => {
+                  // Find the contact for this person
+                  const contact = contacts.find((c) => c.contact_id === p.key);
+                  if (contact) {
+                    const items = getContactContextMenuItems(contact, {
+                      onEdit: () => {
+                        setContactForm({
+                          phone: contact.contact_id.replace(/^dm:/, ""),
+                          name: contact.display_name || "",
+                        });
+                        setComposer("contact");
+                      },
+                      onMessage: () => {
+                        onOpenChat(contact.contact_id);
+                      },
+                      onDelete: () => {
+                        setConfirmDelete(contact.contact_id);
+                      },
+                    }, (msg) => {
+                      setStatus(msg);
+                    });
+                    contextMenu.openContextMenu(e, items, p.key);
+                  }
+                }}
+              >
                 <div className="person-card-head">
                   <span className="person-avatar" style={avatarTint(p.key)} aria-hidden>
                     {initials(p.name)}
@@ -661,6 +684,7 @@ export function PeopleScreen({
       </section>
 
       <section className="convo people-detail">
+        {topNotice}
         {!selected ? (
           <div className="people-detail-empty">
             <h2>{directory.length} people</h2>
@@ -755,7 +779,7 @@ export function PeopleScreen({
                 ) : (
                   <button
                     type="button"
-                    className="act-btn"
+                    className="act-btn danger"
                     disabled={selected.kind !== "contact"}
                     onClick={() => setConfirmDelete(selected.key)}
                     title={
@@ -851,7 +875,7 @@ export function PeopleScreen({
                   className={selected.favorite ? "chip active" : "chip"}
                   onClick={() => void patchPerson(selected, { favorite: !selected.favorite })}
                 >
-                  Favourite
+                  Favorite
                 </button>
                 <button
                   type="button"
@@ -963,6 +987,24 @@ export function PeopleScreen({
           </div>
         )}
       </section>
+
+      <ContextMenu
+        position={contextMenu.position}
+        items={contextMenu.items}
+        onClose={contextMenu.closeContextMenu}
+        onEditMenu={() => setMenuEditorOpen(true)}
+      />
+
+      {menuEditorOpen && (
+        <MenuEditor
+          menu={getMenuByObjectType("contact") || { id: "", name: "", objectType: "", items: [] }}
+          onSave={(menu) => {
+            updateMenu(menu);
+            setMenuEditorOpen(false);
+          }}
+          onClose={() => setMenuEditorOpen(false)}
+        />
+      )}
     </>
   );
 }
