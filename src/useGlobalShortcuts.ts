@@ -31,6 +31,10 @@ export function useGlobalShortcuts({ onSearch, onNav, onToggleHelp }: Args): voi
         return;
       }
 
+      // Composer, IVR JSON, and other fields keep their keys. Escape still
+      // closes the top overlay (handled above).
+      if (isTypingTarget(e.target)) return;
+
       const mod = e.metaKey || e.ctrlKey;
       if (mod && !e.altKey && e.key.toLowerCase() === "k") {
         e.preventDefault();
@@ -47,7 +51,6 @@ export function useGlobalShortcuts({ onSearch, onNav, onToggleHelp }: Args): voi
         return;
       }
 
-      if (isTypingTarget(e.target)) return;
       if (mod || e.altKey) return;
 
       if (e.key === "?" || (e.shiftKey && e.key === "/")) {

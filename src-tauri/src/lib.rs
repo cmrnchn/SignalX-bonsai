@@ -5004,6 +5004,7 @@ fn ensure_outbox_worker(state: AppState, account_id: String) {
               item.last_error = Some(format!("failed to persist sent state: {}", e));
               let _ = state.outbox_store.update_item_async(&account_id, item.clone()).await;
               emit_outbox_item_updated(&item);
+              note_outbox_failure(&state, &item);
             }
           }
         }
