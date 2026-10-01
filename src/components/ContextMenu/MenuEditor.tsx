@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useEscapeLayer } from "../../overlayEscape";
 import type { MenuConfig, MenuItemConfig } from "./menuManager";
 import "./MenuEditor.css";
 
@@ -28,6 +29,7 @@ const ACTION_TYPES = [
 ];
 
 export function MenuEditor({ menu, onSave, onClose }: MenuEditorProps) {
+  useEscapeLayer(true, onClose);
   const [items, setItems] = useState<MenuItemConfig[]>(menu.items);
   const [newLabel, setNewLabel] = useState("");
   const [newAction, setNewAction] = useState("copyId");

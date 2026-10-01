@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { useEscapeLayer } from "../../overlayEscape";
 import "./ContextMenu.css";
 
 export interface MenuItem {
@@ -33,6 +34,7 @@ export function ContextMenu({
   onDeleteMenu,
 }: ContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null);
+  useEscapeLayer(position != null, onClose);
 
   useEffect(() => {
     if (!position) return;
@@ -43,17 +45,8 @@ export function ContextMenu({
       }
     };
 
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-
     document.addEventListener("mousedown", handleClickOutside);
-    document.addEventListener("keydown", handleKeyDown);
-
-    return () => {
-      document.removeEventListener("mousedown", handleClickOutside);
-      document.removeEventListener("keydown", handleKeyDown);
-    };
+    return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [position, onClose]);
 
   if (!position) return null;

@@ -743,6 +743,10 @@ export default function App() {
     setClearProductImageFlag(false);
     setCatalogFormOpen(false);
   });
+  useEscapeLayer(searchOpen, () => {
+    setSearchOpen(false);
+    searchInputRef.current?.blur();
+  });
 
   const onSend = async () => {
     if (!selectedId || sending || restartRequired) return;
@@ -2100,12 +2104,6 @@ export default function App() {
                 }}
                 onBlur={() => {
                   if (!searchQ.trim() && panel !== "search") setSearchOpen(false);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Escape") {
-                    setSearchOpen(false);
-                    (e.target as HTMLInputElement).blur();
-                  }
                 }}
                 placeholder="Search"
                 aria-label="Search Messages, People, Catalog, and Orders"
