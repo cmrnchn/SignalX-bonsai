@@ -50,11 +50,15 @@ import {
   fxSearchHits,
   fxThreads,
 } from "./devFixtures";
-import { DeviceLinkQr } from "./DeviceLinkQr";
-import { emptyMenus, IvrMenuComposer } from "./IvrMenuComposer";
+import { emptyMenus } from "./IvrMenuComposer";
 import { ProfileRail } from "./ProfileRail";
+import { Composer } from "./components/Inbox/Composer";
+import { ConvoHeader } from "./components/Inbox/ConvoHeader";
+import { MessageList } from "./components/Inbox/MessageList";
+import { EMPTY_THREAD_FILTER, ThreadList, type ThreadFilter } from "./components/Inbox/ThreadList";
 import { CatalogScreen } from "./components/Catalog/CatalogScreen";
 import { SearchScreen } from "./components/Search/SearchScreen";
+import { SearchOverlay } from "./components/SearchOverlay";
 import { PeopleScreen } from "./components/People/PeopleScreen";
 import { buildDirectory } from "./components/People/people";
 import { PageDashboard, PageNoticeBar } from "./components/Dashboard/PageDashboard";
@@ -62,21 +66,35 @@ import { catalogDashboard, homeDashboard, messagesDashboard, ordersDashboard, pe
 import { matchingMessages, matchingOrders, matchingPeople, matchingProducts, type SearchScope } from "./globalSearch";
 import { OrdersScreen, EMPTY_ORDER_FILTER, type OrderFilterState } from "./components/Orders/OrdersScreen";
 import { SalesScreen } from "./components/Sales/SalesScreen";
+import { OutboxScreen } from "./components/Outbox/OutboxScreen";
+import { AccountSettings } from "./components/Settings/AccountSettings";
+import { AutoReplySettings as AutoReplySettingsTab } from "./components/Settings/AutoReplySettings";
+import { BackupSettings } from "./components/Settings/BackupSettings";
+import { BuyerMenuSettings } from "./components/Settings/BuyerMenuSettings";
+import { SettingsScreen, type SettingsTab } from "./components/Settings/SettingsScreen";
 import { PanelResizer } from "./components/PanelResizer";
-import { formatPhone, formatQty, isGroupThread, stockQtyFromMilli, threadTitle } from "./format";
+import {
+  avatarTint,
+  fmtTime,
+  formatPhone,
+  formatQty,
+  initials,
+  isGroupThread,
+  stockQtyFromMilli,
+  threadTitle,
+} from "./format";
 import { canInvoke, isTauriRuntime } from "./runtime";
 import { usePanelWidths, type PanelLayout } from "./usePanelWidths";
 import { useEscapeLayer } from "./overlayEscape";
 import { useGlobalShortcuts } from "./useGlobalShortcuts";
 import { ShortcutsHelp } from "./components/ShortcutsHelp";
 import { AuditScreen } from "./components/Audit/AuditScreen";
-import { AttachmentPreview } from "./attachmentPreview";
 import { InvoiceExport } from "./components/InvoiceExport";
+import { FeedbackButton } from "./components/FeedbackButton";
+import { saveFeedback } from "./feedbackUtils";
 import {
   IconAudit,
-  IconBolt,
   IconCatalog,
-  IconCompose,
   IconContacts,
   IconImage,
   IconLink,
@@ -87,10 +105,7 @@ import {
   IconSearch,
   IconX,
   IconExport,
-  IconMenuList,
-  IconReply,
   IconSettings,
-  IconSparkle,
 } from "./navIcons";
 import {
   ContextMenu,
@@ -116,7 +131,6 @@ export type Panel =
   | "audit"
   | "invoice-export"
   | "settings";
-type SettingsTab = "account" | "ivr" | "auto" | "backup";
 
 type SellPackRow = {
   key: string;
@@ -159,25 +173,7 @@ const NAV_GROUPS: NavItem[][] = [
 ];
 
 
-function initials(label: string): string {
-  const parts = label.replace(/^\+/, "").trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return "?";
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + parts[1][0]).toUpperCase();
-}
 
-/** Stable per-identity avatar tint. Low saturation so it reads as a tinted
- *  grey rather than a colour accent, but distinct enough to tell rows apart. */
-function avatarTint(seed: string) {
-  let h = 0;
-  for (let i = 0; i < seed.length; i += 1) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
-  const hue = h % 360;
-  return {
-    background: `hsl(${hue} 16% 30%)`,
-    color: `hsl(${hue} 38% 84%)`,
-    boxShadow: `inset 0 0 0 1px hsl(${hue} 20% 42%)`,
-  };
-}
 
 function needsDeviceSetup(
   diagnostics: Diagnostics | null,
@@ -195,19 +191,6 @@ function needsDeviceSetup(
 const HEALTH_OK_MS = 30_000;
 const HEALTH_STALE_MS = 120_000;
 
-function healthTone(s: ReceiveLoopState | null): "green" | "yellow" | "red" {
-  if (!s) return "yellow";
-  if (s.cooldown_until && s.cooldown_until > Date.now()) return "red";
-  if (s.last_receive_error) return s.consecutive_failures > 3 ? "red" : "yellow";
-  if (s.last_receive_ok_at) {
-    const age = Date.now() - s.last_receive_ok_at;
-    if (age <= HEALTH_OK_MS) return "green";
-    if (age <= HEALTH_STALE_MS) return "yellow";
-    return "red";
-  }
-  return "yellow";
-}
-
 function healthLabel(s: ReceiveLoopState | null): string {
   if (!s) return "Connecting…";
   if (s.cooldown_until && s.cooldown_until > Date.now()) return "Self-heal cooldown";
@@ -221,15 +204,6 @@ function healthLabel(s: ReceiveLoopState | null): string {
   return "Waiting for first receive";
 }
 
-function fmtTime(ts: number): string {
-  if (!ts) return "";
-  const d = new Date(ts);
-  const now = new Date();
-  if (d.toDateString() === now.toDateString()) {
-    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  }
-  return d.toLocaleDateString([], { month: "short", day: "numeric" });
-}
 
 function isEnvelopeNoiseContent(content: string): boolean {
   const t = content.trim();
@@ -238,10 +212,6 @@ function isEnvelopeNoiseContent(content: string): boolean {
   return t.includes('"envelope"') && t.includes('"source"');
 }
 
-function isOutgoing(m: Message): boolean {
-  const d = String(m.direction).toLowerCase();
-  return d === "outgoing" || d.includes("out");
-}
 
 function money(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
@@ -345,8 +315,6 @@ export default function App() {
   const [addPin, setAddPin] = useState("");
   const [addLabel, setAddLabel] = useState("");
   const [rosterBusy, setRosterBusy] = useState(false);
-  const [changePinCurrent, setChangePinCurrent] = useState("");
-  const [changePinNew, setChangePinNew] = useState("");
   const [diagnostics, setDiagnostics] = useState<Diagnostics | null>(null);
   const [health, setHealth] = useState<ReceiveLoopState | null>(null);
   const [ai, setAi] = useState<AiStatus | null>(null);
@@ -493,11 +461,7 @@ export default function App() {
   const [backupBusy, setBackupBusy] = useState(false);
   const [backupPassword, setBackupPassword] = useState("");
   const [restartRequired, setRestartRequired] = useState(false);
-  const [threadFilter, setThreadFilter] = useState({
-    kind: "all" as "all" | "dm" | "group",
-    unread: false,
-    pending: false,
-  });
+  const [threadFilter, setThreadFilter] = useState<ThreadFilter>(EMPTY_THREAD_FILTER);
   const [orderFilter, setOrderFilter] = useState<OrderFilterState>(EMPTY_ORDER_FILTER);
   const bottomRef = useRef<HTMLDivElement>(null);
   const selectedRef = useRef<string | null>(null);
@@ -1708,7 +1672,6 @@ export default function App() {
     }
   }, [panel, settingsTab]);
 
-  const tone = healthTone(health);
   const title = selectedId ? threadTitle(selectedId, contacts, groups, customers) : "SignalX";
   // Product thumbnails arrive as base64 over the API, one call each, so fetch
   // them lazily for the catalog grid and keep what we've already resolved.
@@ -2056,16 +2019,12 @@ export default function App() {
         </div>
       )}
       <aside className="rail">
-        <div className="brand" data-label={`SignalX — ${healthLabel(health)}`}>
-          <span className={`health health-${tone}`} aria-hidden />
-        </div>
-
         <div className="account-switch">
           <button
             type="button"
             className="nav-btn"
-            data-label={session?.locked ? "Locked — click to unlock" : accountNumber ?? "Not configured"}
-            aria-label="Account"
+            data-label={`${session?.locked ? "Locked — click to unlock" : accountNumber ?? "Not configured"} · ${healthLabel(health)}`}
+            aria-label="Switch account"
             aria-expanded={accountMenuOpen}
             onClick={() => setAccountMenuOpen((o) => !o)}
           >
@@ -2099,41 +2058,6 @@ export default function App() {
                 Switch account…
               </button>
             </div>
-          )}
-        </div>
-
-        {setupNeeded && (
-          <button
-            type="button"
-            className="nav-btn"
-            data-label="Link this Mac to start receiving Signal messages"
-            aria-label="Link this Mac to start receiving Signal messages"
-            onClick={openDeviceLinkSetup}
-          >
-            <span className="nav-btn-label">
-              <span className="nav-ico" aria-hidden>
-                <IconLink />
-              </span>
-            </span>
-          </button>
-        )}
-
-        <div className="rail-status-chips" aria-label="System status">
-          <span
-            className={`rail-chip-dot ${ai?.configured && ai.ollama_reachable ? "ok" : "warn"}`}
-            data-label={`AI: ${
-              ai?.configured
-                ? ai.ollama_reachable
-                  ? ai.ollama_model || "ollama"
-                  : "unreachable"
-                : "not configured"
-            }`}
-          />
-          {autoSettings?.enabled && (
-            <span className="rail-chip-dot danger" data-label="Auto-reply on" />
-          )}
-          {ivrSettings?.enabled && (
-            <span className="rail-chip-dot ok" data-label="Buyer menu on" />
           )}
         </div>
 
@@ -2270,130 +2194,49 @@ export default function App() {
       </aside>
 
       {panel === "threads" && (
-        <section className="thread-col">
-          <header className="col-head">
-            Messages
-            <button
-              type="button"
-              className={newDmOpen ? "icon-btn active" : "icon-btn"}
-              aria-label="New message"
-              aria-pressed={newDmOpen}
-              title="New message"
-              onClick={() => setNewDmOpen((v) => !v)}
-            >
-              <IconCompose />
-            </button>
-          </header>
-          {newDmOpen && (
-            <div className="compose-strip">
-              <input
-                autoFocus
-                placeholder="+15551234567"
-                value={newDmPhone}
-                onChange={(e) => {
-                  setNewDmPhone(e.target.value);
-                  setNewDmError(null);
-                }}
-                onKeyDown={(e) => e.key === "Enter" && void openNewDm()}
-                aria-invalid={!!newDmError}
-              />
-              <button type="button" className="action-btn primary" onClick={() => void openNewDm()}>
-                Start
-              </button>
-              {newDmError && <span className="warn-text">{newDmError}</span>}
-            </div>
-          )}
-          <div className="filter-strip">
-            <div className="chip-row">
-              {(["all", "dm", "group"] as const).map((k) => (
-                <button
-                  key={k}
-                  type="button"
-                  className={threadFilter.kind === k ? "chip active" : "chip"}
-                  onClick={() => setThreadFilter((f) => ({ ...f, kind: k }))}
-                >
-                  {k === "all" ? "All" : k === "dm" ? "Direct" : "Groups"}
-                </button>
-              ))}
-              <span className="chip-sep" aria-hidden />
-              <button
-                type="button"
-                className={threadFilter.unread ? "chip active" : "chip"}
-                aria-pressed={threadFilter.unread}
-                onClick={() => setThreadFilter((f) => ({ ...f, unread: !f.unread }))}
-              >
-                Unread
-              </button>
-              <button
-                type="button"
-                className={threadFilter.pending ? "chip active" : "chip"}
-                aria-pressed={threadFilter.pending}
-                onClick={() => setThreadFilter((f) => ({ ...f, pending: !f.pending }))}
-              >
-                Pending
-              </button>
-              <span className="chip-count">
-                {filteredThreads.length}/{threads.length}
-              </span>
-            </div>
-          </div>
-          <div className="thread-list">
-            {threads.length === 0 && (
-              <p className="empty">No threads yet — open a chat above or wait for Signal traffic.</p>
-            )}
-            {threads.length > 0 && filteredThreads.length === 0 && (
-              <p className="empty">No threads match these filters.</p>
-            )}
-            {filteredThreads.map((t) => (
-              <button
-                key={t.id}
-                type="button"
-                className={selectedId === t.id ? "thread-row active p-3 gap-3" : "thread-row p-3 gap-3"}
-                onClick={() => {
-                  setSelectedId(t.id);
-                  setPanel("threads");
-                }}
-                onContextMenu={(e) => {
-                  const items = getThreadContextMenu(t.id);
-                  const menu = getMenuByObjectType("thread");
-                  contextMenu.openContextMenu(
-                    e,
-                    [
-                      ...items,
-                      { id: "divider", label: "", action: () => {}, divider: true },
-                    ],
-                    t.id,
-                  );
-                  if (menu) {
-                    setEditingMenu(menu.id);
-                  }
-                }}
-              >
-                <span className="avatar-dot" style={avatarTint(t.id)} aria-hidden>
-                  {initials(threadTitle(t.id, contacts, groups, customers))}
-                </span>
-                <div className="thread-row-body">
-                  <div className="thread-row-top">
-                    <span className="thread-name">{threadTitle(t.id, contacts, groups, customers)}</span>
-                    <span className="thread-time">{fmtTime(t.last_message_timestamp)}</span>
-                  </div>
-                  <div className="thread-row-meta">
-                    {t.last_preview ? (
-                      <span className="snippet">{t.last_preview}</span>
-                    ) : (
-                      <span className="snippet muted">No messages yet</span>
-                    )}
-                    {t.unread_count > 0 && <span className="badge">{t.unread_count}</span>}
-                    {t.outbox_count > 0 && <span className="badge muted">{t.outbox_count} pending</span>}
-                  </div>
-                </div>
-              </button>
-            ))}
-          </div>
-        </section>
+        <ThreadList
+          threads={threads}
+          filteredThreads={filteredThreads}
+          selectedId={selectedId}
+          contacts={contacts}
+          groups={groups}
+          customers={customers}
+          filter={threadFilter}
+          onFilterChange={setThreadFilter}
+          newDmOpen={newDmOpen}
+          onToggleNewDm={() => setNewDmOpen((v) => !v)}
+          newDmPhone={newDmPhone}
+          onNewDmPhoneChange={(value) => {
+            setNewDmPhone(value);
+            setNewDmError(null);
+          }}
+          newDmError={newDmError}
+          onStartNewDm={() => void openNewDm()}
+          onSelectThread={(id) => {
+            setSelectedId(id);
+            setPanel("threads");
+          }}
+          onThreadContextMenu={(e, id) => {
+            const items = getThreadContextMenu(id);
+            const menu = getMenuByObjectType("thread");
+            contextMenu.openContextMenu(
+              e,
+              [...items, { id: "divider", label: "", action: () => {}, divider: true }],
+              id,
+            );
+            if (menu) {
+              setEditingMenu(menu.id);
+            }
+          }}
+        />
       )}
 
-      {panel === "search" && (
+      <SearchOverlay
+        isOpen={panel === "search"}
+        query={searchLiveQ}
+        onQueryChange={setSearchLiveQ}
+        onClose={() => setPanel("threads")}
+      >
         <SearchScreen
           query={searchLiveQ}
           scope={searchScope}
@@ -2436,7 +2279,7 @@ export default function App() {
             setPanel("orders");
           }}
         />
-      )}
+      </SearchOverlay>
 
       {panel === "people" && (
           <PeopleScreen
@@ -2888,90 +2731,20 @@ export default function App() {
       )}
 
       {panel === "outbox" && (
-        <section className="thread-col wide">
-          <header className="col-head">
-            Outbox
-            <span className="col-meta">
-              {(() => {
-                const queued = globalOutbox.filter((o) => o.state === "queued").length;
-                const sending = globalOutbox.filter((o) => o.state === "sending").length;
-                const failed = globalOutbox.filter((o) => o.state === "failed").length;
-                if (queued + sending + failed === 0 && outboxSummary) {
-                  return `${outboxSummary.queued} queued · ${outboxSummary.sending} sending · ${outboxSummary.failed} failed`;
-                }
-                return `${queued} queued · ${sending} sending · ${failed} failed`;
-              })()}
-            </span>
-          </header>
-          <div className="filter-strip">
-            <button type="button" className="ghost-btn" onClick={() => void refreshGlobalOutbox()}>
-              Refresh
-            </button>
-            <span className="col-meta">{globalOutbox.length} open</span>
-          </div>
-          <div className="outbox-table">
-            {globalOutbox.length === 0 && (
-              <p className="empty">Outbox clear — nothing queued or failed.</p>
-            )}
-            {globalOutbox.length > 0 && (
-              <div className="outbox-head" aria-hidden>
-                <span>To</span>
-                <span>Preview</span>
-                <span>Status</span>
-                <span>Age</span>
-                <span />
-              </div>
-            )}
-            {globalOutbox.map((o) => (
-              <div key={o.id} className={`outbox-row state-${o.state}`}>
-                <div className="outbox-to">
-                  <strong>{threadTitle(o.thread_id, contacts, groups, customers)}</strong>
-                  {o.attachment_path ? <span className="convo-sub">Attachment</span> : null}
-                </div>
-                <div className="outbox-preview">
-                  {o.content.slice(0, 120) || (o.attachment_path ? "(attachment)" : "(empty)")}
-                  {o.content.length > 120 ? "…" : ""}
-                  {o.last_error && <div className="bubble-err">{o.last_error}</div>}
-                </div>
-                <span
-                  className={`status-pill status-${
-                    o.state === "failed" ? "danger" : o.state === "sending" ? "warn" : "muted"
-                  }`}
-                >
-                  {o.state}
-                </span>
-                <span className="outbox-age">
-                  {fmtTime(o.created_at)}
-                  {o.attempt_count > 0 ? ` · ${o.attempt_count}` : ""}
-                </span>
-                <div className="row-actions">
-                  {o.state === "failed" && (
-                    <button type="button" className="action-btn primary" onClick={() => void onRetry(o.id).then(() => refreshGlobalOutbox())}>
-                      Retry
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    className="ghost-btn"
-                    onClick={() => void onDeleteOutbox(o.id).then(() => refreshGlobalOutbox())}
-                  >
-                    Discard
-                  </button>
-                  <button
-                    type="button"
-                    className="ghost-btn"
-                    onClick={() => {
-                      setSelectedId(o.thread_id);
-                      setPanel("threads");
-                    }}
-                  >
-                    Open
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
+        <OutboxScreen
+          items={globalOutbox}
+          summary={outboxSummary}
+          contacts={contacts}
+          groups={groups}
+          customers={customers}
+          onRefresh={refreshGlobalOutbox}
+          onRetry={onRetry}
+          onDelete={onDeleteOutbox}
+          onOpenThread={(threadId) => {
+            setSelectedId(threadId);
+            setPanel("threads");
+          }}
+        />
       )}
 
       {panel === "audit" && (
@@ -2993,8 +2766,8 @@ export default function App() {
         <section className="thread-col wide">
           <header className="col-head">
             <div>
-              <div>Export</div>
-              <div className="col-head-sub">Generate formatted invoices for Signal</div>
+              <div>Invoice Export</div>
+              <div className="col-head-sub">Format and send via Signal</div>
             </div>
           </header>
           <InvoiceExport />
@@ -3002,657 +2775,94 @@ export default function App() {
       )}
 
       {panel === "settings" && (
-        <section className="thread-col wide">
-          <header className="col-head">
-            <div>
-              <div>Settings</div>
-              <div className="col-head-sub">
-                {settingsTab === "account" && "Link Signal and check that messages are flowing"}
-                {settingsTab === "ivr" && "Let buyers text a number — you write the menu"}
-                {settingsTab === "auto" && "Optional AI replies — only for chats you allow"}
-                {settingsTab === "backup" && "Copy your catalog, orders, and chats to a file"}
-              </div>
-            </div>
-          </header>
-          <div className="work-tabs" role="tablist" aria-label="Settings sections">
-            {(
-              [
-                ["account", "Account"],
-                ["ivr", "Buyer menu"],
-                ["auto", "Auto-reply"],
-                ["backup", "Backup"],
-              ] as const
-            ).map(([id, label]) => (
-              <button
-                key={id}
-                type="button"
-                role="tab"
-                aria-selected={settingsTab === id}
-                className={settingsTab === id ? "work-tab active" : "work-tab"}
-                onClick={() => setSettingsTab(id)}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-          <div className="settings-body wide-body">
-            {settingsTab === "account" && (
-              <>
-                <div className="settings-card">
-                  <div className="settings-card-head">
-                    <h3>Status</h3>
-                    <span
-                      className={`status-pill status-${
-                        setupNeeded
-                          ? "warn"
-                          : diagnostics?.signal_cli_usable
-                            ? "ok"
-                            : "danger"
-                      }`}
-                    >
-                      {setupNeeded
-                        ? "Needs link"
-                        : !canInvoke() || !diagnostics
-                          ? "Preview"
-                          : diagnostics.signal_cli_usable
-                            ? "Ready"
-                            : "signal-cli issue"}
-                    </span>
-                  </div>
-                  <dl className="diag-grid diag-grid-4">
-                    <div>
-                      <dt>Account</dt>
-                      <dd title={diagnostics?.number || undefined}>
-                        {diagnostics?.number || "Not set"}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>Receive</dt>
-                      <dd title={healthLabel(health)}>{healthLabel(health)}</dd>
-                    </div>
-                    <div>
-                      <dt>signal-cli</dt>
-                      <dd>
-                        {diagnostics?.signal_cli_usable
-                          ? diagnostics.signal_cli_version || "ok"
-                          : "broken"}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>AI</dt>
-                      <dd>
-                        {ai?.configured
-                          ? ai.ollama_reachable
-                            ? ai.ollama_model || "ollama"
-                            : "unreachable"
-                          : "off"}
-                      </dd>
-                    </div>
-                  </dl>
-                  {diagnostics?.signal_cli_last_error && (
-                    <p className="hint tight warn-text">{diagnostics.signal_cli_last_error}</p>
-                  )}
-                  <details className="settings-details">
-                    <summary>Paths &amp; diagnostics</summary>
-                    <dl className="diag-list">
-                      <div>
-                        <dt>Config</dt>
-                        <dd>{diagnostics?.config_path || "—"}</dd>
-                      </div>
-                      <div>
-                        <dt>Env file</dt>
-                        <dd>{diagnostics?.env_path || "—"}</dd>
-                      </div>
-                      <div>
-                        <dt>signal-cli bin</dt>
-                        <dd>{diagnostics?.signal_cli_path || "—"}</dd>
-                      </div>
-                      <div>
-                        <dt>App data</dt>
-                        <dd>{diagnostics?.app_data_dir || "—"}</dd>
-                      </div>
-                    </dl>
-                  </details>
-                </div>
-
-                <div className="settings-card">
-                  <div className="settings-card-head">
-                    <h3>Device link</h3>
-                    <span
-                      className={`status-pill status-${
-                        linkStatus?.state === "success"
-                          ? "ok"
-                          : linkStatus?.state === "error"
-                            ? "danger"
-                            : linkBusy || linkStatus?.state === "waiting"
-                              ? "warn"
-                              : "muted"
-                      }`}
-                    >
-                      {linkBusy || linkStatus?.state === "waiting"
-                        ? "WAITING"
-                        : linkStatus?.state === "success"
-                          ? "LINKED"
-                          : linkStatus?.state === "error"
-                            ? "FAILED"
-                            : linkStatus?.state === "cancelled"
-                              ? "CANCELLED"
-                              : "IDLE"}
-                    </span>
-                  </div>
-                  <p className="hint tight">
-                    Link this Mac to your Signal phone. After it says Linked, add the number to the
-                    roster with a PIN — do not relaunch to switch identities.
-                  </p>
-                  <div className="row-actions">
-                    <button
-                      type="button"
-                      className="action-btn primary"
-                      disabled={linkBusy || !diagnostics?.signal_cli_usable}
-                      onClick={() => void startDeviceLink()}
-                    >
-                      Start linking
-                    </button>
-                    <button
-                      type="button"
-                      className="ghost-btn"
-                      disabled={!linkBusy}
-                      onClick={() => void cancelDeviceLink()}
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                  {linkUri && (
-                    <div className="device-link-panel">
-                      <DeviceLinkQr uri={linkUri} />
-                      <div className="device-link-uri">
-                        <code className="device-link-uri-text" title={linkUri}>
-                          {linkUri}
-                        </code>
-                        <button type="button" className="action-btn" onClick={() => void copyLinkUri()}>
-                          {linkCopied ? "Copied" : "Copy"}
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                  {linkStatus?.message && (
-                    <p
-                      className={`hint tight ${
-                        linkStatus.state === "error" ? "warn-text" : ""
-                      }`}
-                    >
-                      {linkStatus.message}
-                    </p>
-                  )}
-                  {!diagnostics?.config_path && (
-                    <p className="hint tight warn-text">
-                      Set <code>SIGNALX_SIGNALCLI_CONFIG</code> in <code>.signalx.env</code> before
-                      linking.
-                    </p>
-                  )}
-                </div>
-
-                <div className="settings-card">
-                  <div className="settings-card-head">
-                    <h3>Roster</h3>
-                  </div>
-                  <p className="hint tight">
-                    Each number is a separate shop (catalog, orders, IVR). Only one session is live.
-                    Switching stops receive and the outbox for the previous number.
-                  </p>
-                  <ul className="roster-list">
-                    {(session?.accounts ?? []).map((a) => (
-                      <li key={a.id} className={a.is_active ? "roster-row active" : "roster-row"}>
-                        <div>
-                          <strong>{a.label || a.e164}</strong>
-                          <span className="hint tight">
-                            {" "}
-                            ••••{a.last4}
-                            {a.has_pin ? " · PIN" : " · no PIN"}
-                            {a.is_active ? " · live" : ""}
-                          </span>
-                        </div>
-                        {a.is_active && (
-                          <form
-                            className="roster-pin-form"
-                            onSubmit={(e) => {
-                              e.preventDefault();
-                              void (async () => {
-                                const res = await api.setAccountPin(
-                                  a.id,
-                                  changePinCurrent,
-                                  changePinNew,
-                                );
-                                if (!res.success) {
-                                  setStatus(res.error);
-                                  return;
-                                }
-                                applySession(res.data);
-                                setChangePinCurrent("");
-                                setChangePinNew("");
-                                setStatus("PIN updated");
-                              })();
-                            }}
-                          >
-                            <input
-                              type="password"
-                              placeholder="Current PIN (blank if none)"
-                              value={changePinCurrent}
-                              onChange={(e) => setChangePinCurrent(e.target.value)}
-                            />
-                            <input
-                              type="password"
-                              placeholder="New PIN"
-                              value={changePinNew}
-                              onChange={(e) => setChangePinNew(e.target.value)}
-                              required
-                            />
-                            <button type="submit" className="ghost-btn">
-                              Set PIN
-                            </button>
-                          </form>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                  {(session?.linked_unseen ?? []).length > 0 && (
-                    <p className="hint tight">
-                      Linked in signal-cli but not in roster:{" "}
-                      {session?.linked_unseen.join(", ")}. Add below.
-                    </p>
-                  )}
-                  <form
-                    className="roster-add"
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      void onAddAccount(addNumber, addPin, addLabel);
-                    }}
-                  >
-                    <input
-                      placeholder="+15551234567"
-                      value={addNumber}
-                      onChange={(e) => setAddNumber(e.target.value)}
-                      required
-                    />
-                    <input
-                      placeholder="Label (optional)"
-                      value={addLabel}
-                      onChange={(e) => setAddLabel(e.target.value)}
-                    />
-                    <input
-                      type="password"
-                      placeholder="PIN (4+ chars)"
-                      value={addPin}
-                      onChange={(e) => setAddPin(e.target.value)}
-                      required
-                    />
-                    <button type="submit" className="action-btn primary" disabled={rosterBusy}>
-                      Add to roster
-                    </button>
-                  </form>
-                </div>
-              </>
-            )}
-
-            {settingsTab === "backup" && (
-              <>
-              <div className="settings-card">
-                <div className="settings-card-head">
-                  <h3>Backup &amp; migrate</h3>
-                </div>
-                <p className="hint tight">
-                  Bundles cover your catalog, customers, orders, buyer menu, chats, and outbox —
-                  not your Signal login. Re-link Signal on a new computer. Leave the password blank
-                  for an unencrypted zip.
-                </p>
-                <label className="field-stack">
-                  <span className="field-label">Optional password</span>
-                  <input
-                    type="password"
-                    autoComplete="new-password"
-                    value={backupPassword}
-                    onChange={(e) => setBackupPassword(e.target.value)}
-                    placeholder="Blank = unencrypted"
-                    disabled={backupBusy || restartRequired}
-                  />
-                </label>
-                <div className="backup-actions">
-                  <button
-                    type="button"
-                    className="action-btn primary"
-                    disabled={backupBusy || restartRequired}
-                    onClick={() => void onExportDataBundle()}
-                  >
-                    {backupBusy ? "Working…" : "Export data bundle"}
-                  </button>
-                  <button
-                    type="button"
-                    className="ghost-btn"
-                    disabled={backupBusy}
-                    onClick={() =>
-                      void api.exportAccount("json").then((r) => {
-                        if (r.success) setStatus("Chat (messages) exported");
-                        else setStatus(r.error);
-                      })
-                    }
-                  >
-                    Export chat only
-                  </button>
-                </div>
-                <div className="backup-import">
-                  <div className="profile-section-title">Import</div>
-                  <div className="profile-toggles">
-                    <label className="toggle compact">
-                      <input
-                        type="radio"
-                        name="import-mode"
-                        checked={importMode === "replace"}
-                        disabled={restartRequired}
-                        onChange={() => setImportMode("replace")}
-                      />
-                      Replace
-                    </label>
-                    <label className="toggle compact">
-                      <input
-                        type="radio"
-                        name="import-mode"
-                        checked={importMode === "merge"}
-                        disabled={restartRequired}
-                        onChange={() => setImportMode("merge")}
-                      />
-                      Merge
-                    </label>
-                  </div>
-                  <label className="field-stack">
-                    <span className="field-label">Choose .zip bundle</span>
-                    <input
-                      type="file"
-                      accept=".zip,application/zip"
-                      disabled={backupBusy || restartRequired}
-                      onChange={(e) => {
-                        const f = e.target.files?.[0] ?? null;
-                        e.target.value = "";
-                        void onImportDataBundleFile(f);
-                      }}
-                    />
-                  </label>
-                </div>
-                {restartRequired && (
-                  <div className="restart-gate">
-                    <p>
-                      Restart SignalX to apply imported data. Writes stay locked until you quit and
-                      reopen.
-                    </p>
-                    <button type="button" className="action-btn primary" onClick={() => void quitForRestart()}>
-                      Quit now
-                    </button>
-                  </div>
-                )}
-              </div>
-              <div className="settings-card">
-                <div className="settings-card-head">
-                  <h3>What’s in a bundle</h3>
-                </div>
-                <p className="hint tight">
-                  Catalog, people records, orders, buyer menu, chats, and outbox. Signal login stays
-                  on the device — re-link after you move.
-                </p>
-              </div>
-              </>
-            )}
-
-            {settingsTab === "auto" && (
-              <>
-              <div className="settings-card">
-                <div className="settings-card-head">
-                  <h3>Auto-reply</h3>
-                  <span className={`status-pill status-${autoSettings?.enabled ? "warn" : "muted"}`}>
-                    {autoSettings?.enabled ? "ON" : "OFF"}
-                  </span>
-                </div>
-                <p className="hint tight">
-                  Optional AI drafts that can send on their own. Keep this off unless you trust it —
-                  and only for chats you approve. Groups stay off unless you turn them on one by one.
-                </p>
-                {autoSettings && (
-                  <>
-                    <label className="toggle">
-                      <input
-                        type="checkbox"
-                        checked={autoSettings.enabled}
-                        onChange={(e) => void saveAutoSettings({ enabled: e.target.checked })}
-                      />
-                      Turn on auto-reply for this account
-                    </label>
-                    <div className="settings-section-label">Safety limits</div>
-                    <div className="settings-grid">
-                      <label className="field-stack">
-                        <span className="field-label">Max replies per chat / hour</span>
-                        <input
-                          type="number"
-                          min={1}
-                          value={autoSettings.max_per_thread_per_hour}
-                          onChange={(e) =>
-                            void saveAutoSettings({
-                              max_per_thread_per_hour: Number(e.target.value) || 1,
-                            })
-                          }
-                        />
-                      </label>
-                      <label className="field-stack">
-                        <span className="field-label">Max global / window</span>
-                        <input
-                          type="number"
-                          min={1}
-                          value={autoSettings.max_per_window}
-                          onChange={(e) =>
-                            void saveAutoSettings({ max_per_window: Number(e.target.value) || 1 })
-                          }
-                        />
-                      </label>
-                      <label className="field-stack">
-                        <span className="field-label">Quiet start (0–23)</span>
-                        <input
-                          type="number"
-                          min={0}
-                          max={23}
-                          placeholder="off"
-                          value={autoSettings.quiet_hours_start ?? ""}
-                          onChange={(e) =>
-                            void saveAutoSettings({
-                              quiet_hours_start: e.target.value === "" ? null : Number(e.target.value),
-                            })
-                          }
-                        />
-                      </label>
-                      <label className="field-stack">
-                        <span className="field-label">Quiet end</span>
-                        <input
-                          type="number"
-                          min={0}
-                          max={23}
-                          placeholder="off"
-                          value={autoSettings.quiet_hours_end ?? ""}
-                          onChange={(e) =>
-                            void saveAutoSettings({
-                              quiet_hours_end: e.target.value === "" ? null : Number(e.target.value),
-                            })
-                          }
-                        />
-                      </label>
-                    </div>
-                    <div className="allowlist-head">
-                      <span className="field-label">
-                        Allowed chats ({autoSettings.allowlist.length})
-                      </span>
-                      <button
-                        type="button"
-                        className="ghost-btn"
-                        onClick={() => void addToAllowlist("auto", selectedId)}
-                      >
-                        Add current chat
-                      </button>
-                    </div>
-                    {autoSettings.allowlist.length === 0 ? (
-                      <p className="hint tight">Empty — nobody can auto-send.</p>
-                    ) : (
-                      <ul className="allowlist-list">
-                        {autoSettings.allowlist.map((tid) => (
-                          <li key={tid}>
-                            <div>
-                              <div className="thread-name">{threadTitle(tid, contacts, groups, customers)}</div>
-                              <div className="convo-sub">{tid}</div>
-                            </div>
-                            <button
-                              type="button"
-                              className="ghost-btn"
-                              onClick={() => void removeFromAllowlist("auto", tid)}
-                            >
-                              Remove
-                            </button>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </>
-                )}
-              </div>
-              <div className="settings-card">
-                <div className="settings-card-head">
-                  <h3>Recent log</h3>
-                  <button type="button" className="ghost-btn" onClick={() => setPanel("audit")}>
-                    Open log
-                  </button>
-                </div>
-                {audit.length === 0 ? (
-                  <p className="hint tight">No auto-reply activity yet.</p>
-                ) : (
-                  <ul className="settings-log">
-                    {audit.slice(0, 5).map((e) => (
-                      <li key={e.id}>
-                        <span className={`outcome outcome-${e.outcome.toLowerCase().replace(/\s+/g, "_")}`}>
-                          {e.outcome}
-                        </span>
-                        <span>
-                          {threadTitle(e.thread_id, contacts, groups, customers)}
-                          {e.reason ? ` — ${e.reason}` : ""}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            </>
-            )}
-
-            {settingsTab === "ivr" && (
-              <>
-                <div className="settings-card">
-                  <div className="settings-card-head">
-                    <h3>Buyer text menu</h3>
-                    <span className={`status-pill status-${ivrSettings?.enabled ? "ok" : "muted"}`}>
-                      {ivrSettings?.enabled ? "ON" : "OFF"}
-                    </span>
-                  </div>
-                  <p className="hint tight">
-                    When it’s on, buyers can text a number (1 for products, 2 to order, and so on)
-                    and SignalX answers for you. Turn it on here, then turn it on for each chat you
-                    want. Group chats are never automated.
-                  </p>
-                  {ivrSettings && (
-                    <>
-                      <label className="toggle">
-                        <input
-                          type="checkbox"
-                          checked={ivrSettings.enabled}
-                          onChange={(e) => void saveIvrSettings({ enabled: e.target.checked })}
-                        />
-                        Turn on buyer menus for this account
-                      </label>
-                      <label className="toggle">
-                        <input
-                          type="checkbox"
-                          checked={ivrSettings.require_allowlist}
-                          onChange={(e) =>
-                            void saveIvrSettings({ require_allowlist: e.target.checked })
-                          }
-                        />
-                        Only chats I approve (recommended)
-                      </label>
-                      <label className="toggle">
-                        <input
-                          type="checkbox"
-                          checked={!!ivrSettings.hide_zero_stock}
-                          onChange={(e) =>
-                            void saveIvrSettings({ hide_zero_stock: e.target.checked })
-                          }
-                        />
-                        Don’t show products that are out of stock
-                      </label>
-                      <div className="allowlist-head">
-                        <span className="field-label">
-                          Approved chats ({ivrSettings.allowlist.length})
-                        </span>
-                        <button
-                          type="button"
-                          className="ghost-btn"
-                          onClick={() => void addToAllowlist("ivr", selectedId)}
-                        >
-                          Add this chat
-                        </button>
-                      </div>
-                      {ivrSettings.allowlist.length === 0 ? (
-                        <p className="hint tight">
-                          None yet — open a 1:1 chat and turn on the buyer menu there, or add it
-                          here.
-                        </p>
-                      ) : (
-                        <ul className="allowlist-list">
-                          {ivrSettings.allowlist.map((tid) => (
-                            <li key={tid}>
-                              <div>
-                                <div className="thread-name">{threadTitle(tid, contacts, groups, customers)}</div>
-                                <div className="convo-sub">{tid}</div>
-                              </div>
-                              <button
-                                type="button"
-                                className="ghost-btn"
-                                onClick={() => void removeFromAllowlist("ivr", tid)}
-                              >
-                                Remove
-                              </button>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                    </>
-                  )}
-                </div>
-
-                <div className="settings-card">
-                  <div className="settings-card-head">
-                    <h3>Build the menu</h3>
-                  </div>
-                  <p className="hint tight">
-                    Switch between a visual map of the conversation and a plain text script. Edit a
-                    screen, test it on the phone pad, then save.
-                  </p>
-                  <IvrMenuComposer
-                    menus={ivrMenusDraft}
-                    busy={ivrMenusBusy}
-                    error={ivrMenusError}
-                    previewSteps={ivrPreviewSteps}
-                    onChange={setIvrMenusDraft}
-                    onSave={() => void saveIvrMenusDraft()}
-                    onReload={() => void loadIvrMenusEditor()}
-                    onResetDemo={() => void resetIvrMenusDemo()}
-                    onPreview={(inputs) => void previewIvrPath(inputs)}
-                  />
-                </div>
-              </>
-            )}
-          </div>
-        </section>
+        <SettingsScreen tab={settingsTab} onTabChange={setSettingsTab}>
+          {settingsTab === "account" && (
+            <AccountSettings
+              setupNeeded={setupNeeded}
+              diagnostics={diagnostics}
+              receiveLabel={healthLabel(health)}
+              ai={ai}
+              linkBusy={linkBusy}
+              linkStatus={linkStatus}
+              linkUri={linkUri}
+              linkCopied={linkCopied}
+              onStartLink={() => void startDeviceLink()}
+              onCancelLink={() => void cancelDeviceLink()}
+              onCopyLinkUri={() => void copyLinkUri()}
+              session={session}
+              onSetPin={async (accountId, currentPin, newPin) => {
+                const res = await api.setAccountPin(accountId, currentPin, newPin);
+                if (!res.success) {
+                  setStatus(res.error);
+                  return false;
+                }
+                applySession(res.data);
+                setStatus("PIN updated");
+                return true;
+              }}
+              addNumber={addNumber}
+              onAddNumberChange={setAddNumber}
+              addLabel={addLabel}
+              onAddLabelChange={setAddLabel}
+              addPin={addPin}
+              onAddPinChange={setAddPin}
+              rosterBusy={rosterBusy}
+              onAddAccount={() => void onAddAccount(addNumber, addPin, addLabel)}
+            />
+          )}
+          {settingsTab === "backup" && (
+            <BackupSettings
+              password={backupPassword}
+              onPasswordChange={setBackupPassword}
+              busy={backupBusy}
+              restartRequired={restartRequired}
+              importMode={importMode}
+              onImportModeChange={setImportMode}
+              onExportBundle={() => void onExportDataBundle()}
+              onExportChatOnly={() =>
+                void api.exportAccount("json").then((r) => {
+                  if (r.success) setStatus("Chat (messages) exported");
+                  else setStatus(r.error);
+                })
+              }
+              onImportFile={(f) => void onImportDataBundleFile(f)}
+              onQuitForRestart={() => void quitForRestart()}
+            />
+          )}
+          {settingsTab === "auto" && (
+            <AutoReplySettingsTab
+              settings={autoSettings}
+              onSave={(patch) => void saveAutoSettings(patch)}
+              onAllowCurrentChat={() => void addToAllowlist("auto", selectedId)}
+              onRemoveFromAllowlist={(tid) => void removeFromAllowlist("auto", tid)}
+              audit={audit}
+              onOpenLog={() => setPanel("audit")}
+              contacts={contacts}
+              groups={groups}
+              customers={customers}
+            />
+          )}
+          {settingsTab === "ivr" && (
+            <BuyerMenuSettings
+              settings={ivrSettings}
+              onSave={(patch) => void saveIvrSettings(patch)}
+              onAllowCurrentChat={() => void addToAllowlist("ivr", selectedId)}
+              onRemoveFromAllowlist={(tid) => void removeFromAllowlist("ivr", tid)}
+              contacts={contacts}
+              groups={groups}
+              customers={customers}
+              menus={ivrMenusDraft}
+              menusBusy={ivrMenusBusy}
+              menusError={ivrMenusError}
+              previewSteps={ivrPreviewSteps}
+              onMenusChange={setIvrMenusDraft}
+              onSaveMenus={() => void saveIvrMenusDraft()}
+              onReloadMenus={() => void loadIvrMenusEditor()}
+              onResetDemo={() => void resetIvrMenusDemo()}
+              onPreview={(inputs) => void previewIvrPath(inputs)}
+            />
+          )}
+        </SettingsScreen>
       )}
 
       {(panel === "audit" ||
@@ -3709,106 +2919,39 @@ export default function App() {
                 goOrders: () => setPanel("orders"),
                 goPeople: () => setPanel("people"),
               },
+              setupNeeded
+                ? [
+                    {
+                      key: "setup-link",
+                      icon: <IconLink />,
+                      kicker: "Setup needed",
+                      title: "Link this Mac",
+                      body: "Signal messages won't arrive until this Mac is linked to your phone.",
+                      primary: { label: "Link now", onClick: openDeviceLinkSetup },
+                      urgent: true,
+                    },
+                  ]
+                : [],
             )}
           />
         ) : (
           <>
-            <header className="convo-head">
-              <div className="convo-head-id">
-                <h2>{title}</h2>
-                <div className="convo-sub">
-                  {isGroupThread(selectedId) ? "Group" : formatPhone(selectedId)}
-                </div>
-              </div>
-              <div className="convo-actions">
-                {threadAuto?.effective && (
-                  <span className="auto-thread-badge">Auto-reply ON</span>
-                )}
-                {threadIvr?.effective && (
-                  <span className="auto-thread-badge">Buyer menu ON</span>
-                )}
-                {threadIvr?.handed_off && (
-                  <span className="auto-thread-badge warn">Waiting on you</span>
-                )}
-                {ivrHint && (
-                  <span className="auto-thread-badge warn" title={ivrHint}>
-                    {ivrHint}
-                  </span>
-                )}
-                <button
-                  type="button"
-                  className={threadIvr?.enabled ? "act-btn active" : "act-btn"}
-                  aria-pressed={!!threadIvr?.enabled}
-                  disabled={isGroupThread(selectedId)}
-                  title="Buyer menu"
-                  onClick={() => void toggleThreadIvr(!threadIvr?.enabled)}
-                >
-                  <IconMenuList />
-                  <span>Buyer menu</span>
-                </button>
-                {threadIvr?.handed_off && (
-                  <button type="button" className="ghost-btn" onClick={() => void resumeIvrBot()}>
-                    Resume menu
-                  </button>
-                )}
-                {!threadIvr?.enabled && ivrSettings?.enabled && !isGroupThread(selectedId) && (
-                  <span className="convo-sub inline-hint">Turn on to let this chat use the menu</span>
-                )}
-                <button
-                  type="button"
-                  className={threadAuto?.opted_in ? "act-btn active" : "act-btn"}
-                  aria-pressed={!!threadAuto?.opted_in}
-                  title="Opt this chat in to auto-reply"
-                  onClick={() => void toggleThreadAuto(!threadAuto?.opted_in)}
-                >
-                  <IconBolt />
-                  <span>Auto-reply</span>
-                </button>
-                <span className="act-sep" aria-hidden />
-                <details className="act-more">
-                  <summary className="act-btn">More</summary>
-                  <div className="act-more-pop">
-                <button
-                  type="button"
-                  className="act-btn"
-                  disabled={aiBusy || !ai?.configured}
-                  title={
-                    ai?.configured
-                      ? "Summarize this conversation"
-                      : "AI not configured — enable Ollama in Settings."
-                  }
-                  onClick={() => void onSummarize()}
-                >
-                  <IconSparkle />
-                  <span>Summarize</span>
-                </button>
-                <button
-                  type="button"
-                  className="act-btn"
-                  disabled={aiBusy || !ai?.configured}
-                  title={
-                    ai?.configured
-                      ? "Draft a reply"
-                      : "AI not configured — enable Ollama in Settings."
-                  }
-                  onClick={() => void onDraft()}
-                >
-                  <IconReply />
-                  <span>Draft</span>
-                </button>
-                <button
-                  type="button"
-                  className="act-btn"
-                  title="Export this thread"
-                  onClick={() => void onExportThread()}
-                >
-                  <IconExport />
-                  <span>Export</span>
-                </button>
-                  </div>
-                </details>
-              </div>
-            </header>
+            <ConvoHeader
+              threadId={selectedId}
+              title={title}
+              threadAuto={threadAuto}
+              threadIvr={threadIvr}
+              ivrSettings={ivrSettings}
+              ivrHint={ivrHint}
+              ai={ai}
+              aiBusy={aiBusy}
+              onToggleIvr={(next) => void toggleThreadIvr(next)}
+              onResumeIvr={() => void resumeIvrBot()}
+              onToggleAuto={(next) => void toggleThreadAuto(next)}
+              onSummarize={() => void onSummarize()}
+              onDraft={() => void onDraft()}
+              onExport={() => void onExportThread()}
+            />
 
             {summaryText && (
               <div className="summary-box">
@@ -3822,108 +2965,32 @@ export default function App() {
               </div>
             )}
 
-            <div className="msg-scroll">
-              {messages.map((m) => (
-                <div
-                  key={m.id}
-                  className={isOutgoing(m) ? "bubble out" : "bubble in"}
-                >
-                  <div className="bubble-meta">
-                    <span>
-                      {isOutgoing(m)
-                        ? "You"
-                        : isGroupThread(selectedId)
-                          ? threadTitle(m.sender, contacts, groups, customers)
-                          : threadTitle(selectedId || m.sender, contacts, groups, customers)}
-                    </span>
-                    <span>{fmtTime(m.timestamp)}</span>
-                  </div>
-                  <div className="bubble-body">{m.content}</div>
-                  {m.attachment_path && <AttachmentPreview path={m.attachment_path} />}
-                </div>
-              ))}
-              {(selectedId
-                ? globalOutbox.filter((o) => o.thread_id === selectedId)
-                : []
-              ).map((o) => (
-                <div key={o.id} className={`bubble out pending state-${o.state}`}>
-                  <div className="bubble-meta">
-                    <span>{o.state}{o.attempt_count > 0 ? ` (attempt ${o.attempt_count})` : ""}</span>
-                    <span>{fmtTime(o.created_at)}</span>
-                  </div>
-                  <div className="bubble-body">{o.content}</div>
-                  {o.attachment_path && <AttachmentPreview path={o.attachment_path} />}
-                  {o.last_error && <div className="bubble-err">{o.last_error}</div>}
-                  <div className="bubble-actions">
-                    {o.state === "failed" && (
-                      <button type="button" onClick={() => void onRetry(o.id)}>
-                        Retry
-                      </button>
-                    )}
-                    <button type="button" onClick={() => void onDeleteOutbox(o.id)}>
-                      Discard
-                    </button>
-                  </div>
-                </div>
-              ))}
-              <div ref={bottomRef} />
-            </div>
+            <MessageList
+              threadId={selectedId}
+              messages={messages}
+              pending={globalOutbox.filter((o) => o.thread_id === selectedId)}
+              contacts={contacts}
+              groups={groups}
+              customers={customers}
+              bottomRef={bottomRef}
+              onRetry={(id) => void onRetry(id)}
+              onDiscard={(id) => void onDeleteOutbox(id)}
+            />
 
-            <div className="composer">
-              {attachPreview && (
-                <div className="attach-chip">
-                  <img src={attachPreview} alt="" />
-                  <span>{attachFile?.name || "Attachment"}</span>
-                  <button
-                    type="button"
-                    className="ghost-btn"
-                    onClick={() => {
-                      setAttachFile(null);
-                      if (attachPreview) URL.revokeObjectURL(attachPreview);
-                      setAttachPreview(null);
-                    }}
-                  >
-                    Remove
-                  </button>
-                </div>
-              )}
-              <div className="composer-row">
-                <label className="attach-btn" title="Attach image or file">
-                  <IconImage />
-                  <input
-                    type="file"
-                    accept="image/*,.pdf,.txt,.csv"
-                    onChange={(e) => {
-                      const file = e.target.files?.[0] || null;
-                      setAttachFile(file);
-                      if (attachPreview) URL.revokeObjectURL(attachPreview);
-                      setAttachPreview(file ? URL.createObjectURL(file) : null);
-                      e.target.value = "";
-                    }}
-                  />
-                </label>
-                <textarea
-                  value={composer}
-                  onChange={(e) => setComposer(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey && !(e as any).isComposing) {
-                      e.preventDefault();
-                      void onSend();
-                    }
-                  }}
-                  placeholder="Write a message… (Enter to send, Shift+Enter for newline)"
-                  rows={3}
-                />
-                <button
-                  type="button"
-                  className="send-btn"
-                  disabled={sending || restartRequired || (!composer.trim() && !attachFile)}
-                  onClick={() => void onSend()}
-                >
-                  {sending ? "…" : "Send"}
-                </button>
-              </div>
-            </div>
+            <Composer
+              value={composer}
+              onChange={setComposer}
+              attachFile={attachFile}
+              attachPreview={attachPreview}
+              onAttach={(file) => {
+                setAttachFile(file);
+                if (attachPreview) URL.revokeObjectURL(attachPreview);
+                setAttachPreview(file ? URL.createObjectURL(file) : null);
+              }}
+              sending={sending}
+              blocked={restartRequired}
+              onSend={() => void onSend()}
+            />
           </>
         )}
       </main>
@@ -4063,6 +3130,16 @@ export default function App() {
           }}
         />
       )}
+      <FeedbackButton
+        onSubmit={async (feedback) => {
+          await saveFeedback({
+            timestamp: new Date().toISOString(),
+            feedback,
+            userAgent: navigator.userAgent,
+            url: window.location.href,
+          });
+        }}
+      />
     </div>
   );
 }

@@ -779,7 +779,7 @@ export function PeopleScreen({
                 ) : (
                   <button
                     type="button"
-                    className="act-btn"
+                    className="act-btn danger"
                     disabled={selected.kind !== "contact"}
                     onClick={() => setConfirmDelete(selected.key)}
                     title={
@@ -875,7 +875,7 @@ export function PeopleScreen({
                   className={selected.favorite ? "chip active" : "chip"}
                   onClick={() => void patchPerson(selected, { favorite: !selected.favorite })}
                 >
-                  Favourite
+                  Favorite
                 </button>
                 <button
                   type="button"
