@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use base64::Engine;
 use uuid::Uuid;
+use sha2::{Sha256, Digest};
 
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex as AsyncMutex;
@@ -21,6 +22,7 @@ mod uom;
 mod backup;
 mod session;
 mod simple_audit;
+mod validation;
 use ivr::{thread_allowed, IvrMenus, IvrSettings, IvrStore};
 use commerce::{format_catalog_list, CommerceStore, Customer, Product};
 use commerce_audit::CommerceAuditStore;
@@ -76,6 +78,34 @@ const DEFAULT_AGENT_LAST_N: u32 = 50;
 const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
 const DEFAULT_OLLAMA_TIMEOUT_SECS: u64 = 120;
 const OLLAMA_PROBE_TIMEOUT_SECS: u64 = 3;
+
+// --------------------
+// Input Validation (M9)
+// --------------------
+/// Validate that a string is not empty after trimming
+fn validate_nonempty(value: &str, field: &str) -> Result<String, String> {
+  let trimmed = value.trim();
+  if trimmed.is_empty() {
+    return Err(format!("{} cannot be empty", field));
+  }
+  Ok(trimmed.to_string())
+}
+
+/// Validate that a numeric value is in range
+fn validate_in_range(value: i64, min: i64, max: i64, field: &str) -> Result<(), String> {
+  if value < min || value > max {
+    return Err(format!("{} must be between {} and {}", field, min, max));
+  }
+  Ok(())
+}
+
+/// Validate that a value is one of allowed options
+fn validate_enum(value: &str, allowed: &[&str], field: &str) -> Result<(), String> {
+  if !allowed.contains(&value) {
+    return Err(format!("{} must be one of: {}", field, allowed.join(", ")));
+  }
+  Ok(())
+}
 
 // --------------------
 // API helpers
@@ -2549,6 +2579,22 @@ struct AutoReplyAuditEntry {
   /// "sent" | "draft_only" | "blocked"
   outcome: String,
   reason: Option<String>,
+  /// Actor that triggered this event (always "system" for auto-reply)
+  #[serde(default)]
+  actor: Option<String>,
+}
+
+fn redact_draft(full_draft: &str) -> String {
+  let mut hasher = Sha256::new();
+  hasher.update(full_draft.as_bytes());
+  let hash = format!("{:x}", hasher.finalize());
+  let hash_short = &hash[..16.min(hash.len())];
+  let summary = if full_draft.len() > 50 {
+    format!("{}... [#{}]", &full_draft[..50], hash_short)
+  } else {
+    format!("{} [#{}]", full_draft, hash_short)
+  };
+  summary
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -3420,6 +3466,17 @@ fn set_contact_meta(state: &AppState, contact_id: String, patch: ContactMetaPatc
   if cid.is_empty() {
     return err("contact_id cannot be empty".to_string());
   }
+  // M9: Validate patch fields
+  if let Some(Some(name)) = &patch.display_name {
+    if name.len() > 255 {
+      return err("display_name must be <= 255 chars".to_string());
+    }
+  }
+  if let Some(Some(alias)) = &patch.alias {
+    if alias.len() > 255 {
+      return err("alias must be <= 255 chars".to_string());
+    }
+  }
   match state.contact_store.upsert_patch(&account_id, cid, patch) {
     Ok(m) => {
       ok_t(m)
@@ -3440,6 +3497,14 @@ fn delete_contact_meta(state: &AppState, contact_id: String) -> Value {
   match state.contact_store.delete(&account_id, cid) {
     Ok(changed) => {
       if changed {
+        state.commerce_audit.record(
+          "contact_deleted",
+          &format!("Contact {} deleted", contact_id),
+          None,
+          None,
+          None,
+          now_ms(),
+        );
       }
       ok(json!(changed))
     }
@@ -3571,6 +3636,17 @@ fn set_group_meta(state: &AppState, group_id: String, patch: GroupMetaPatch) -> 
   if gid.is_empty() {
     return err("group_id cannot be empty".to_string());
   }
+  // M9: Validate patch fields
+  if let Some(Some(name)) = &patch.display_name {
+    if name.len() > 255 {
+      return err("display_name must be <= 255 chars".to_string());
+    }
+  }
+  if let Some(notes) = &patch.notes {
+    if notes.len() > 2000 {
+      return err("notes must be <= 2000 chars".to_string());
+    }
+  }
   match state.group_store.upsert_patch(&account_id, gid, patch) {
     Ok(m) => {
       ok_t(m)
@@ -3591,6 +3667,14 @@ fn delete_group_meta(state: &AppState, group_id: String) -> Value {
   match state.group_store.delete(&account_id, gid) {
     Ok(changed) => {
       if changed {
+        state.commerce_audit.record(
+          "group_deleted",
+          &format!("Group {} deleted", group_id),
+          None,
+          None,
+          None,
+          now_ms(),
+        );
       }
       ok(json!(changed))
     }
@@ -4563,10 +4647,11 @@ fn trigger_agent_draft(state: AppState, agent: AgentModeConfig, ts: ThreadState,
               account_id: account_id.clone(),
               thread_id: tid.clone(),
               message_id: mid.clone(),
-              draft: draft.clone(),
+              draft: redact_draft(&draft),
               created_at: now_ms(),
               outcome: outcome.to_string(),
               reason,
+              actor: Some("system".to_string()),
             };
             state_for_auto.auto_reply.append_audit(entry.clone());
             emit_auto_reply_audit(&entry);
@@ -4577,10 +4662,11 @@ fn trigger_agent_draft(state: AppState, agent: AgentModeConfig, ts: ThreadState,
               account_id: account_id.clone(),
               thread_id: tid.clone(),
               message_id: mid.clone(),
-              draft: draft.clone(),
+              draft: redact_draft(&draft),
               created_at: now_ms(),
               outcome: "draft_only".to_string(),
               reason: Some(reason),
+              actor: Some("system".to_string()),
             };
             state_for_auto.auto_reply.append_audit(entry.clone());
             emit_auto_reply_audit(&entry);
@@ -5020,6 +5106,14 @@ fn set_auto_reply_settings(state: &AppState, settings: AutoReplySettings) -> Val
   match state.auto_reply.set_settings(settings) {
     Ok(s) => {
       emit_event("auto-reply://settings", s.clone());
+      state.commerce_audit.record(
+        "auto_reply_settings_updated",
+        "Auto-reply settings modified",
+        None,
+        None,
+        None,
+        now_ms(),
+      );
       ok_t(s)
     }
     Err(e) => err(e),
@@ -5414,6 +5508,14 @@ fn set_ivr_settings(state: &AppState, settings: IvrSettings) -> Value {
   match state.ivr.set_settings(settings) {
     Ok(s) => {
       emit_event("ivr://settings", s.clone());
+      state.commerce_audit.record(
+        "ivr_settings_updated",
+        "IVR settings modified",
+        None,
+        None,
+        None,
+        now_ms(),
+      );
       ok_t(s)
     }
     Err(e) => err(e),
@@ -5430,6 +5532,14 @@ fn set_ivr_menus(state: &AppState, menus: IvrMenus) -> Value {
   }
   match state.ivr.set_menus(menus) {
     Ok(m) => {
+      state.commerce_audit.record(
+        "ivr_menus_updated",
+        &format!("IVR menus updated ({} nodes)", m.nodes.len()),
+        None,
+        None,
+        None,
+        now_ms(),
+      );
       emit_event("ivr://menus", m.clone());
       ok_t(m)
     }
@@ -5441,6 +5551,14 @@ fn reset_ivr_menus(state: &AppState) -> Value {
   match state.ivr.reset_menus_to_demo() {
     Ok(m) => {
       emit_event("ivr://menus", m.clone());
+      state.commerce_audit.record(
+        "ivr_menus_reset",
+        "IVR menus reset to default",
+        None,
+        None,
+        None,
+        now_ms(),
+      );
       ok_t(m)
     }
     Err(e) => err(e),
@@ -5558,12 +5676,47 @@ fn list_products(state: &AppState) -> Value {
   ok_t(state.commerce.list_products())
 }
 
-fn upsert_product(state: &AppState, product: Product) -> Value {
+fn upsert_product(state: &AppState, mut product: Product) -> Value {
   if let Some(v) = reject_if_import_locked(state) {
     return v;
   }
-  match state.commerce.upsert_product(product, now_ms()) {
+
+  // Validate input
+  if let Err(e) = validation::validate_name(&product.name, "Product name") {
+    return err(e.0);
+  }
+  if let Err(e) = validation::validate_price(product.price_cents) {
+    return err(e.0);
+  }
+  if product.quantity_base_milli > 0 {
+    let qty_in_base = product.quantity_base_milli as f64 / 1000.0;
+    if let Err(e) = validation::validate_stock_quantity(qty_in_base) {
+      return err(e.0);
+    }
+  }
+
+  // Normalize SKU
+  match validation::validate_and_normalize_sku(&product.sku) {
+    Ok(normalized_sku) => product.sku = normalized_sku,
+    Err(e) => return err(e.0),
+  }
+
+  match state.commerce.upsert_product(product.clone(), now_ms()) {
     Ok(p) => {
+      let is_new = product.id.is_empty();
+      state.commerce_audit.record(
+        if is_new { "product_created" } else { "product_updated" },
+        &format!(
+          "{} · {}{}",
+          p.name,
+          if is_new { "created" } else { "updated" },
+          if !p.sku.is_empty() { format!(" ({})", p.sku) } else { String::new() }
+        ),
+        None,
+        Some(p.id.clone()),
+        None,
+        now_ms(),
+      );
       emit_event("commerce://products", state.commerce.list_products());
       ok_t(p)
     }
@@ -5578,6 +5731,16 @@ fn delete_product(state: &AppState, id: String) -> Value {
   match state.commerce.delete_product(id.trim()) {
     Ok(deleted) => {
       emit_event("commerce://products", state.commerce.list_products());
+      if deleted {
+        state.commerce_audit.record(
+          "product_deleted",
+          &format!("Product {} deleted", id),
+          None,
+          Some(id.clone()),
+          None,
+          now_ms(),
+        );
+      }
       ok(json!({ "deleted": deleted }))
     }
     Err(e) => err(e),
@@ -5777,8 +5940,22 @@ fn upsert_customer(state: &AppState, customer: Customer) -> Value {
   if let Some(v) = reject_if_import_locked(state) {
     return v;
   }
-  match state.commerce.upsert_customer(customer, now_ms()) {
+
+  if let Err(e) = validation::validate_name(&customer.display_name, "Customer name") {
+    return err(e.0);
+  }
+
+  match state.commerce.upsert_customer(customer.clone(), now_ms()) {
     Ok(c) => {
+      let is_new = customer.id.is_empty();
+      state.commerce_audit.record(
+        if is_new { "customer_created" } else { "customer_updated" },
+        &format!("{} {}", c.display_name, if is_new { "created" } else { "updated" }),
+        None,
+        None,
+        Some(c.thread_id.clone()),
+        now_ms(),
+      );
       emit_event("commerce://customers", state.commerce.list_customers());
       ok_t(c)
     }
@@ -5789,6 +5966,16 @@ fn upsert_customer(state: &AppState, customer: Customer) -> Value {
 fn delete_customer(state: &AppState, id: String) -> Value {
   match state.commerce.delete_customer(id.trim()) {
     Ok(deleted) => {
+      if deleted {
+        state.commerce_audit.record(
+          "customer_deleted",
+          &format!("Customer {} deleted", id),
+          None,
+          None,
+          None,
+          now_ms(),
+        );
+      }
       emit_event("commerce://customers", state.commerce.list_customers());
       ok(json!({ "deleted": deleted }))
     }
@@ -6245,6 +6432,46 @@ fn sales_summary(
     "top_products": top_products,
     "orders": orders,
   }))
+}
+
+// --------------------
+// Feedback storage
+// --------------------
+fn save_feedback_impl(
+  feedback: String,
+  timestamp: String,
+  user_agent: String,
+  url: String,
+) -> Result<(), String> {
+  let feedback_dir = std::env::var("HOME")
+    .ok()
+    .and_then(|home| Some(PathBuf::from(home).join(".signalx_feedback")))
+    .ok_or_else(|| "Could not determine home directory".to_string())?;
+
+  std::fs::create_dir_all(&feedback_dir)
+    .map_err(|e| format!("Failed to create feedback directory: {}", e))?;
+
+  let filename = format!(
+    "feedback-{}.json",
+    std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .map(|d| d.as_millis())
+      .unwrap_or(0)
+  );
+
+  let entry = json!({
+    "timestamp": timestamp,
+    "feedback": feedback,
+    "userAgent": user_agent,
+    "url": url,
+  });
+
+  let filepath = feedback_dir.join(filename);
+  std::fs::write(&filepath, serde_json::to_string_pretty(&entry).unwrap_or_default())
+    .map_err(|e| format!("Failed to write feedback: {}", e))?;
+
+  eprintln!("Feedback saved to: {:?}", filepath);
+  Ok(())
 }
 
 // --------------------
@@ -6970,6 +7197,18 @@ fn cmd_rename_account(state: State<'_, AppState>, id: String, label: String) -> 
 fn cmd_remove_from_roster(state: State<'_, AppState>, id: String, pin: String) -> Value {
   remove_from_roster(&state, id, pin)
 }
+#[tauri::command]
+fn cmd_save_feedback(
+  feedback: String,
+  timestamp: String,
+  user_agent: String,
+  url: String,
+) -> Value {
+  match save_feedback_impl(feedback, timestamp, user_agent, url) {
+    Ok(()) => ok(json!({})),
+    Err(e) => err(e),
+  }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -7097,6 +7336,7 @@ pub fn run() {
       cmd_set_account_pin,
       cmd_rename_account,
       cmd_remove_from_roster,
+      cmd_save_feedback,
     ])
     .run(tauri::generate_context!())
     .expect("error while running SignalX");
